@@ -1212,7 +1212,14 @@ function cancel(e) {
     /* ★ 必须打上 cancelled 标记：这时候 rec.best 是**搜索中途的半成品**
        （visits 很少、胜率还没收敛）。前端若把它当正常结果上屏，
        胜率条会瞬间跳到极端值（用户实测报过：点数子后胜率条突变、几秒后才恢复）。 */
-    rec.resolve(rec.best ? Object.assign({}, rec.best, { cancelled: true }) : { cancelled: true });
+    /* ★★ 2026-10-14（首相报的「点了停止没停」+「过一会儿突然就停了」）：
+       整盘分析是 **collect 模式**（多回合逐条累积、收齐才 resolve），中止时必须
+       **把已经收到的那些回合一起交回** —— 用户点「停止」的期望是"停下，并把已经算好的留下"。
+       原来只 resolve 一个 `{cancelled:true}` 空壳，前端拿不到 turns，只能报「整盘分析失败」，
+       那几十秒就白算了。 */
+    rec.resolve(rec.collect
+      ? { turns: (rec.turns || []).slice().sort((a, b) => a.turn - b.turn), cancelled: true }
+      : (rec.best ? Object.assign({}, rec.best, { cancelled: true }) : { cancelled: true }));
   }
   e.lastId = null;
   return { ok: true };

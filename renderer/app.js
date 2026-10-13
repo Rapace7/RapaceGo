@@ -746,6 +746,23 @@ function currentPathIsMainline() {
   return true;
 }
 
+/* ---- 当前路径与主变**从第几手岔开**（1 基手号；不岔开返回 0）----
+ * ★ 2026-10-14 加（首相实拍反馈）：「我已经选中主干，但上面显示（这一条是分支）」——
+ *   光说"这是分支"没用，用户根本定位不到岔口在哪一手。
+ *   实测复现不出"按空格本身会导致判成分支"（新对局、两份真实棋谱各按 4 次空格，判定全程正常），
+ *   真正会岔开的是「悔棋之后又落子」这类操作：那确实从某一点长出一条新支。
+ *   所以这条的价值是**告诉用户岔在第几手**，让他知道往哪儿看、怎么切回去。
+ * 判据按**节点身份**比（与 currentPathIsMainline 同口径），不比坐标。 */
+function mainlineDivergenceAt() {
+  ensureBranch();
+  const main = [];
+  let cur = branchRoot;
+  while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; main.push(cur); }
+  const n = Math.min(main.length, state.moves.length);
+  for (let i = 0; i < n; i++) if (main[i] !== state.moves[i]) return i + 1;
+  return main.length === state.moves.length ? 0 : n + 1;
+}
+
 /* 某个节点在不在主变链上（从根沿每层 _cs[0] 一路到底）。
    ⚠️ 「我是父节点的头一个孩子」只是**局部**判据 —— 侧支深处的珠子（比如 11a）
    对它父亲同样是 _cs[0]，但它所在那条支并不是主变。必须沿祖先链逐级查到根。
@@ -3364,11 +3381,28 @@ function buildReview(nMoves, turns) {
   blunders.b.sort((x, y) => y.loss - x.loss);
   blunders.w.sort((x, y) => y.loss - x.loss);
 
+  /* ★★ 2026-10-14 首相要求（方案 C）：**把每手的候选点也存进 review.json**。
+     为什么非要存它：逐手讲解需要「AI 当时想下哪」（`best.move` 与它的胜率），
+     而这个信息**不在 history / leads 里** —— 只有整盘分析的 `turns[t].moves` 才有。
+     不存它的后果（首相实测）：选了「跳过重算」之后每一手都取不到候选点、
+     直接走「这一手之前的局面没算出候选点」分支 —— **一次 LoGos 都不调**，
+     进度条空转几百毫秒就结束，看着就是"什么都没发生"。
+     存法：每手前 3 个候选，每个只留 `[坐标, 胜率]`（胜率是**轮到谁走**那一方的口径，
+     与 `bestPointNote` 用的同一个数），保留 4 位小数。
+     体积：217 手 × 3 × 约 18 字节 ≈ 12 KB —— 换"跳过重算也能讲"很值。 */
+  const cands = [];
+  for (let t = 0; t < nMoves; t++) {
+    const ms = (turns[t] && turns[t].moves) || [];
+    const top = ms.slice().sort((a, b) => (a.order ?? 99) - (b.order ?? 99)).slice(0, 3);
+    cands.push(top.map(m => [m.move, Math.round((typeof m.winrate === 'number' ? m.winrate : 0) * 10000) / 10000]));
+  }
+
   return {
-    v: 2,
+    v: 3,
     losses, sides,
     blunders: { b: blunders.b.slice(0, 8), w: blunders.w.slice(0, 8) },
     nBlunder: blunders.b.length + blunders.w.length,
+    cands,
   };
 }
 
@@ -7321,6 +7355,34 @@ function cleanCoachText(s) {
     .trim());
 }
 
+/* ---- 流式期间用的「温和清洗」（2026-10-14 首相实测报的「疯狂重置」）----
+ *
+ * 现象（首相原话）：「疯狂重置输出，先输出几个字然后又清空重新输出这几个字，
+ *   然后再清空往复好几次，最后生成这个没有下文突然截断的东西。」
+ *
+ * 根因：流式每来一小段，都拿**完整清洗**（cleanCoachText）过一遍。而完整清洗里有
+ *   好几条是**结构性删减**：
+ *     · 未闭合的左括号，连同其后内容一起删（`（黑棋第 13 手` 这种半边话必然命中）
+ *     · 连续的「行首 + 短括号」整段砍
+ *     · 结尾的半个标点磨掉
+ *     · 句子级去重复（判据要求"完整句子"，中途半句会误判）
+ *     · 「让我看看」这类过渡句（中途可能只匹配到半截）
+ *   **每一条都会让文本变短或改写**。而打字机的判据是「新文本必须是旧文本的延长」
+ *   （makeTyper.put），一变短就 `el.textContent = ''` 清空重打 ——
+ *   于是每来一小段就重置一次，看起来就是"疯狂重置"。
+ *
+ * 所以：**流式期间只剔除模型标签，一个字都不动正文**；
+ * 上面那些收尾动作全部留给**定稿**（cleanCoachText）去做。
+ * ⚠️ `</reasoning>` 那条留着是安全的：这个标记一旦出现就不会再变，最多砍一次。 */
+function cleanCoachTextLive(s) {
+  return String(s == null ? '' : s)
+    .replace(/<\/reasoning>[\s\S]*$/i, '')
+    .replace(/<\/?reasoning>/gi, '')
+    .replace(/<\/?answer>/gi, '')
+    .replace(/\\boxed\{[^}]*\}/g, '');
+}
+
+
 /* ---- 句子级去重复（2026-10-14 凌晨 · 首相实测报的）----
  *
  * 现象（首相原话）：「第一手的讲解出现大量重复句子，一个句子重复一二十遍。
@@ -7501,12 +7563,15 @@ function makeTyper(el) {
 }
 
 /* 讲解的流式渲染：主进程每收到一小段就推一次（带 id）——
-   这里按 id 找到对应的打字机，把**累计文本**喂给它。 */
+   这里按 id 找到对应的打字机，把**累计文本**喂给它。
+   ★ 2026-10-14：这里必须用 **cleanCoachTextLive**（只剔标签、不动正文），
+     不能用完整清洗 —— 完整清洗会让文本变短/改写，打字机就会清空重打，
+     用户看到的是"疯狂重置"。详见 cleanCoachTextLive 的头注释。 */
 const coachTypers = new Map();
 if (window.api && window.api.coach && window.api.coach.onProgress) {
   window.api.coach.onProgress(d => {
     const t = coachTypers.get(d.id);
-    if (t) t.setTarget(cleanCoachText(d.full));
+    if (t) t.setTarget(cleanCoachTextLive(d.full));
   });
 }
 
@@ -8121,18 +8186,36 @@ function batchAskInfo(n) {
   let askReview = false, revBody = '', revButtons = null;
   if (hasRev) {
     askReview = true;
+    /* ★★ 2026-10-14（方案 C）：这份记录里到底有没有「AI 当时想下哪」（候选点）？
+       有 → 跳过重算也能正常逐手讲；没有（v3 之前存的）→ **必须如实说**，
+       并且把推荐项换成「重新算一遍」—— 否则用户选了"跳过"，结果讲不了，
+       又是一次"什么都没有发生"（首相实测踩到的就是这个）。 */
+    const hasCands = Array.isArray(state.review.cands) && state.review.cands.length > 1;
     revBody = '<div class="ba-li">这份棋谱旁边已经存着<b>整盘 AI 胜率记录</b>（'
       + (state.review.history.length - 1) + ' 手）。</div>'
       + '<div class="ba-li ba-dim">它是干什么的：KataGo 把整盘每一手都算过一遍之后的胜率，'
-      + '用来标「这一手亏了多少」、也用来画右边那条走势图。<br>'
-      + '逐手讲解需要它，但<b>已经有了就不必重算</b> —— 重算一遍大约要 ' + estMin + ' 分钟。</div>';
-    revButtons = [
-      { label: '跳过重算，用现成的', value: { skipReview: true }, primary: true,
-        tip: '直接沿用已有的胜率记录，省下那几分钟' },
-      { label: '重新算一遍（约 ' + estMin + ' 分钟）', value: { skipReview: false },
-        tip: '只有怀疑这份记录过时了、或换了权重才需要' },
-      { label: '取消', value: null },
-    ];
+      + '用来标「这一手亏了多少」、也用来画右边那条走势图。</div>'
+      + (hasCands
+        ? '<div class="ba-li ba-dim">它里面<b>也存了「AI 当时想下哪」</b>，所以跳过重算也能正常逐手讲解，'
+          + '<b>建议跳过</b>，省下重算的那 ' + estMin + ' 分钟。</div>'
+        : '<div class="ba-li">⚠️ 这份记录是<b>旧版</b>存的 —— 里面<b>没有「AI 当时想下哪」</b>。'
+          + '<span class="ba-dim">跳过重算的话，走势图和「亏了多少」都能用，但<b>逐手讲解讲不了</b>'
+          + '（讲解必须知道 AI 当时想下哪儿）。想讲就选下面那个「重新算一遍」。</span></div>');
+    revButtons = hasCands
+      ? [
+        { label: '跳过重算，用现成的', value: { skipReview: true }, primary: true,
+          tip: '直接沿用已有的胜率记录，省下那几分钟' },
+        { label: '重新算一遍（约 ' + estMin + ' 分钟）', value: { skipReview: false },
+          tip: '只有怀疑这份记录过时了、或换了权重才需要' },
+        { label: '取消', value: null },
+      ]
+      : [
+        { label: '重新算一遍（约 ' + estMin + ' 分钟）', value: { skipReview: false }, primary: true,
+          tip: '这份旧记录里没有「AI 想下哪」，要讲解就必须重算一遍' },
+        { label: '跳过重算（这次讲不了）', value: { skipReview: true },
+          tip: '沿用现成的胜率，只画走势图，不做逐手讲解' },
+        { label: '取消', value: null },
+      ];
   }
 
   /* ---------- 窗二：要不要续跑讲解（★ 后弹这个） ---------- */
@@ -8176,7 +8259,13 @@ async function runBatchCoach() {
      它按**手号**把整盘结果写进 history/leads/explain 并落盘 <棋谱名>.coach.json，
      而旁支与主线的同一段手号指的是不同的棋 —— 在旁支上跑 = 把主线那份讲解覆盖掉。 */
   if (!currentPathIsMainline()) {
-    flash('全盘讲解要站在主变上跑（现在这一条是分支）—— 按 PgUp 把这一支提为主变，或按 ↑/↓ 切回主变');
+    /* ★ 2026-10-14：把「岔在第几手」报出来 —— 原来只说"这是分支"，
+       首相实拍反馈「我已经选中主干，但上面显示这是分支」，根本定位不到岔口。 */
+    const at = mainlineDivergenceAt();
+    flash(at
+      ? ('全盘讲解要站在主变上跑 —— 现在这条从**第 ' + at + ' 手**起就和主变不一样了。'
+        + '按 ↑/↓ 切回主变；或者按 PgUp 把现在这一支直接提为主变')
+      : '全盘讲解要站在主变上跑（现在这一条是分支）—— 按 PgUp 把这一支提为主变，或按 ↑/↓ 切回主变');
     return;
   }
   if (needEngine('coach', '全盘讲解')) return;
@@ -8243,7 +8332,22 @@ async function runBatchCoach() {
           ⚠️ 不要伪造 winrate：那会被下面当成真数据写进 history。 */
     let turns;
     if (skipReview) {
-      turns = new Array(Math.max(2, Math.min(state.history.length, n + 1))).fill(null);
+      /* ★★ 2026-10-14 首相要求（方案 C）：从记录里**读回候选点** —— 这是"跳过重算还能讲"的关键。
+         有候选点 → 照常逐手讲；没有（v3 之前的旧记录）→ 空占位 + 如实说明一句。
+         ⚠️ 长度一律用 `n + 1`，**不要再拿 `state.history.length` 去推**：
+            两者理论同步，但"讲到第几手"不该由它决定 —— 它缺了顶多某几手没有胜率数字，
+            却会把整盘缩成只讲两三手（原来那行 `Math.min(state.history.length, n+1)` 就是这毛病）。 */
+      const cands = Array.isArray(state.review && state.review.cands) ? state.review.cands : null;
+      turns = new Array(n + 1).fill(null);
+      if (cands && cands.length > 1) {
+        for (let i = 0; i < Math.min(cands.length, n + 1); i++) {
+          const arr = cands[i] || [];
+          if (arr.length) turns[i] = { moves: arr.map((p, k) => ({ move: p[0], winrate: p[1], order: k })) };
+        }
+      } else {
+        flash('这份胜率记录是旧版存的（里面没有「AI 想下哪」）—— 走势图能用，'
+          + '但这次逐手讲解讲不了。想讲就重来一次、在弹窗里选「重新算一遍」');
+      }
     } else {
       const req = {
         initialStones: state.setup.map(s => [s.color === 'b' ? 'B' : 'W', toGTP(s.x, s.y)]),
@@ -8258,7 +8362,17 @@ async function runBatchCoach() {
       try { res = await window.api.review(req); } catch (e) { res = { error: String(e) }; }
       reviewBusy = false;
       if (gen !== gameGen) return;         // 期间换了棋谱 → 整体作废（finally 会收拾界面）
-      if (!res || res.error || !res.turns || res.turns.length < 2) {
+      /* ★★ 2026-10-14（首相报的「点了停止没停」）：用户点了「停止」→ main.js 现在会把
+         **已经收到的那些回合**带 `cancelled` 一起交回。这时不该报"失败"，
+         而应该只拿算到的那部分往下讲（与"超时兜底"同一条路）。
+         原来它直接落进下面的失败分支、报「整盘分析失败」，把已经算好的几十秒全丢了。 */
+      if (res && res.cancelled) {
+        if (!res.turns || res.turns.length < 2) {
+          flash('已停下整盘分析 —— 还没算出可用的手数');
+          return;
+        }
+        flash('已停下 —— 这次只讲已经算到的 ' + (res.turns.length - 1) + ' 手（回头再点会接着算）');
+      } else if (!res || res.error || !res.turns || res.turns.length < 2) {
         flash('整盘分析失败：' + ((res && res.error) || '引擎没给出结果'));
         return;
       }
@@ -8409,6 +8523,13 @@ $('btn-batch').onclick = () => runBatchCoach();
 $('batch-stop').onclick = () => {
   batchStop = true;
   window.api.coach.cancel();          // 掐掉正在写的那一手
+  /* ★★ 2026-10-14（首相报的「点了停止没停整个算全盘的进程」「过一会儿突然就停了」）：
+     原来这里**只掐讲解通道**，而 KataGo 那一步（整盘分析，几分钟）照跑不误 ——
+     因为它是一个独立的、不可中断的请求：阶段① 送出去之后就一直在等，
+     期间点的"停止"只写了个标志，而那个标志**只在阶段②（逐手讲）的循环里被检查**。
+     现在同步掐掉引擎那一步：main.js 会把**已经收到的那些回合**带 `cancelled` 交回，
+     前端据此只讲算到的部分（见 runBatchCoach 里对 res.cancelled 的处理）。 */
+  try { window.api.engine.cancel(); } catch (e) { /* 拿不到也不影响停讲解 */ }
   setBatchBar(true, 0, 1, '正在停…');
 };
 /* ★ 启动初始化放在**最后**（讲解模块的 const 都已求值）：

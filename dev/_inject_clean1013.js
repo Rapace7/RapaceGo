@@ -56,5 +56,31 @@
   const normal = '这一手 E17（白棋第 4 手）下出来，这手不错，它在左上占了个空角，还和黑棋D14这颗子形成呼应。';
   ok('D11 ★ 正常讲解一字不改', cleanCoachText(normal) === normal, cleanCoachText(normal));
 
+  /* ---------- 流式 vs 定稿：两种清洗必须分开（首相 2026-10-14 报的「疯狂重置」） ----------
+     判据就是打字机自己的判据：**新文本必须是旧文本的延长**，否则它会清空重打。
+     所以：温和清洗必须全程保持这个性质；完整清洗必然破坏它（所以流式不能用它）。 */
+  const full = '这一手 K17（黑棋第 13 手）下出来，这手不行，白棋有好几处便宜可占。'
+    + '它左边这块棋还没活干净。让我看看中央那几颗子，黑棋应该先补一手。';
+  const steps = [];
+  for (let i = 2; i <= full.length; i += 3) steps.push(full.slice(0, i));
+
+  let prev = '', bad = 0, badAt = '';
+  for (const s of steps) {
+    const cur = cleanCoachTextLive(s);
+    if (!cur.startsWith(prev)) { bad++; if (!badAt) badAt = JSON.stringify(cur.slice(0, 24)) + ' ← ' + JSON.stringify(prev.slice(0, 24)); }
+    prev = cur;
+  }
+  ok('D12 ★ 流式用的温和清洗：每一步都是上一步的延长（打字机不会重置）',
+    bad === 0, bad ? (bad + ' 次中断，首个：' + badAt) : '');
+
+  let prev2 = '', broke = 0;
+  for (const s of steps) {
+    const cur = cleanCoachText(s);
+    if (!cur.startsWith(prev2)) broke++;
+    prev2 = cur;
+  }
+  ok('D13 对照：完整清洗**会**让文本变短/改写（这正是「疯狂重置」的成因，所以流式期间不能用它）',
+    broke > 0, broke + ' 次中断');
+
   return L.join('\n');
 })();

@@ -42,8 +42,11 @@
   state.review = null; state.coach.explain = {};
   ok('B1 ★ 既没胜率也没讲解 → 返回 null（不弹窗 = 直接开跑）', batchAskInfo(n) === null);
 
-  /* ---------- ② 只有胜率 → **只该弹窗一** ---------- */
-  state.review = { file: state.recName, history: new Array(n + 1).fill(0.5), leads: new Array(n + 1).fill(0) };
+  /* ---------- ② 只有胜率（**新版记录：带候选点**）→ 推荐「跳过重算」 ---------- */
+  state.review = {
+    file: state.recName, history: new Array(n + 1).fill(0.5), leads: new Array(n + 1).fill(0),
+    cands: new Array(n + 1).fill(null).map(() => [['C17', 0.288], ['D4', 0.25], ['Q16', 0.2]]),
+  };
   let a = batchAskInfo(n);
   ok('B2 有胜率 → 要弹窗一（askReview）', !!a && a.askReview === true);
   ok('B3 没讲解 → **不弹**窗二（askCoach）', !!a && a.askCoach === false);
@@ -56,6 +59,27 @@
     a && a.revButtons.map(b => b.label).join(' | '));
   ok('B8 窗一有「取消」，value 为 null',
     !!a && a.revButtons[a.revButtons.length - 1].label === '取消' && a.revButtons[a.revButtons.length - 1].value === null);
+  ok('B8x ★ 带候选点的记录：正文说明「跳过也能正常逐手讲解」',
+    !!a && a.revBody.indexOf('也能正常逐手讲解') >= 0);
+
+  /* ---------- ②b ★★ 旧版记录（**没有候选点**）→ 推荐项必须反过来，并且如实说明 ----------
+     首相 2026-10-14 实测踩到的正是这个：他选了「跳过重算」，然后**什么都没发生** ——
+     因为旧记录里没有「AI 想下哪」，逐手讲解根本讲不了。所以现在必须：
+       · 正文明确写出「讲不了」
+       · **把推荐项换成「重新算一遍」**（否则用户又选跳过、又什么都不发生） */
+  state.review = {
+    file: state.recName, history: new Array(n + 1).fill(0.5), leads: new Array(n + 1).fill(0),
+  };
+  a = batchAskInfo(n);
+  ok('B8a ★ 旧记录（无候选点）：推荐项换成了「重新算一遍」',
+    !!a && a.revButtons[0].label.indexOf('重新算') >= 0, a && a.revButtons.map(b => b.label).join(' | '));
+  ok('B8b ★ 旧记录：推荐项语义 = skipReview:false（要讲就必须重算）',
+    !!a && a.revButtons[0].value.skipReview === false);
+  ok('B8c ★ 旧记录：正文明确说了「没有 AI 当时想下哪」与「讲不了」',
+    !!a && a.revBody.indexOf('没有') >= 0 && a.revBody.indexOf('讲不了') >= 0, a && a.revBody.slice(0, 90));
+  ok('B8d 旧记录：仍留了「跳过重算（这次讲不了）」这条退路',
+    !!a && a.revButtons.some(b => b.label.indexOf('跳过重算') >= 0 && b.label.indexOf('讲不了') >= 0),
+    a && a.revButtons.map(b => b.label).join(' | '));
 
   /* ---------- ③ 只有讲解 → **只该弹窗二** ---------- */
   state.review = null;
