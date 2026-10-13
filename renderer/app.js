@@ -8042,6 +8042,12 @@ async function loadCoachForRecord(name) {
     + ' —— 点手数列表就能看');
 }
 
+/* 「正在等用户在询问窗里选」的占位标志。
+   ★ 2026-10-14 加：没有它就会出首相实测踩到的那个现象 ——
+   连点两次「全盘讲解」进来两次，第二次重建弹窗时把第一次那批按钮清掉，
+   两个 Promise 都悬着，用户点哪个按钮都没反应。有了它，第二次直接婉拒。 */
+let batchAsking = false;
+
 /* ---- 全盘讲解开跑前的询问窗（2026-10-14 首相要求）----
  *
  * 首相原话（拆成三条规格）：
@@ -8058,6 +8064,12 @@ function askBatchPlan(info) {
   return new Promise(resolve => {
     const mask = $('batchask');
     if (!mask) { resolve(info.fallback || null); return; }
+    /* ★★ 双保险（2026-10-14）：这个弹窗**正在被用着**时，绝不再重建。
+       重建的后果就是首相实测踩到的那个 —— 上一批按钮被 `innerHTML=''` 清掉，
+       两个 Promise 都悬着，界面上"点哪个按钮都没反应"。
+       正常情况由 runBatchCoach 的 `batchAsking` 挡住；这里再兜一道，
+       将来谁加了新入口（快捷键、菜单）也不会再犯。 */
+    if (mask.classList.contains('open')) { resolve(null); return; }
     $('ba-title').textContent = info.title;
     $('ba-body').innerHTML = info.body;
     const acts = $('ba-actions');
@@ -8077,12 +8089,19 @@ function askBatchPlan(info) {
 
 /* ---- 开跑前「要不要先问一句」以及问什么（2026-10-14 首相要求）----
  *
- * 抽成**纯函数**（只读 state，不碰引擎、不弹窗）的两个理由：
- *   ① 好单测 —— 断言直接调它就能把三种情况全覆盖，不必真去跑整盘分析（那要几分钟）；
- *   ② runBatchCoach 只需拿它的结果去弹窗，逻辑不再埋在长函数中间。
+ * ★★ 2026-10-14 晚订正（首相实测报的）：
+ *    第一版把两件事塞进**一个**弹窗，而且弹窗之前没有占位 —— 后果是
+ *    ① 顺序不对：首相要的是「**先问要不要重算（胜率），再问要不要续跑（讲解）**」两个窗；
+ *    ② 连点两次「全盘讲解」会进来两次，第二次把第一次弹窗的按钮 `innerHTML=''` 清掉，
+ *       两个 Promise 都悬着 → **点哪个按钮都没反应**（首相报的正是这个）。
+ *    现在拆成两个独立的窗、按顺序弹；重入由 `batchAsking` + 提前 `disable` 按钮挡住。
  *
- * 返回 null = **不用问**（两样都没有，首相要求直接开跑）；
- * 否则返回 { hasRev, hasCoach, doneAt, estMin, skipReview, body, buttons }。
+ * 抽成**纯函数**（只读 state，不碰引擎、不弹窗）的两个理由：
+ *   ① 好单测 —— 断言直接调它就能把各种情况全覆盖，不必真去跑整盘分析（那要几分钟）；
+ *   ② runBatchCoach 只拿它的结果去弹窗，逻辑不再埋在长函数中间。
+ *
+ * 返回 null = **一个窗都不用弹**（两样都没有，首相要求直接开跑）；
+ * 否则返回 { askReview, revBody, revButtons, askCoach, coachBody, coachButtons }。
  *
  * 三条规格（首相原话）：
  *   ① 已有整盘 AI 胜率记录 → 问「是否跳过重算」，说明它是干啥的，**推荐跳过**；
@@ -8094,50 +8113,48 @@ function batchAskInfo(n) {
   const hasCoach = doneAt.length > 0;
   const hasRev = !!(state.review && state.review.file === state.recName
     && Array.isArray(state.review.history) && state.review.history.length > 1);
-  if (!hasRev && !hasCoach) return null;               // ★ 都没 → 不问
+  if (!hasRev && !hasCoach) return null;               // ★ 都没 → 一个窗都不弹
 
   const estMin = Math.max(1, Math.round(n / 60));      // 粗估：整盘分析约 n/60 分钟
-  const skipReview = hasRev;                           // 默认沿用现成的
-  const body = [];
+
+  /* ---------- 窗一：要不要重算整盘胜率（★ 先弹这个） ---------- */
+  let askReview = false, revBody = '', revButtons = null;
   if (hasRev) {
-    body.push('<div class="ba-li">· <b>整盘 AI 胜率</b>：<b>已经有了</b>（'
-      + (state.review.history.length - 1) + ' 手）。<span class="ba-dim">它给每一手算出胜率，'
-      + '用来标「这一手亏了多少」、也用来画右边的走势图。</span></div>');
-  } else {
-    body.push('<div class="ba-li">· <b>整盘 AI 胜率</b>：还没有 —— 会先让 KataGo 把整盘算一遍。'
-      + '<span class="ba-dim">大约 ' + estMin + ' 分钟；这是逐手讲解的前置，'
-      + '没有它就不知道每一手好在哪、差在哪。</span></div>');
-  }
-  body.push(hasCoach
-    ? '<div class="ba-li">· <b>逐手讲解</b>：已经讲过 <b>' + doneAt.length + ' / ' + n
-      + '</b> 手，还剩 <b>' + (n - doneAt.length) + '</b> 手。</div>'
-    : '<div class="ba-li">· <b>逐手讲解</b>：还没有。</div>');
-  if (hasRev) {
-    body.push('<div class="ba-li ba-dim">· 已有的胜率记录可以直接用，<b>建议跳过重算</b>'
-      + (hasCoach ? '' : '，能省下 ' + estMin + ' 分钟') + '。</div>');
+    askReview = true;
+    revBody = '<div class="ba-li">这份棋谱旁边已经存着<b>整盘 AI 胜率记录</b>（'
+      + (state.review.history.length - 1) + ' 手）。</div>'
+      + '<div class="ba-li ba-dim">它是干什么的：KataGo 把整盘每一手都算过一遍之后的胜率，'
+      + '用来标「这一手亏了多少」、也用来画右边那条走势图。<br>'
+      + '逐手讲解需要它，但<b>已经有了就不必重算</b> —— 重算一遍大约要 ' + estMin + ' 分钟。</div>';
+    revButtons = [
+      { label: '跳过重算，用现成的', value: { skipReview: true }, primary: true,
+        tip: '直接沿用已有的胜率记录，省下那几分钟' },
+      { label: '重新算一遍（约 ' + estMin + ' 分钟）', value: { skipReview: false },
+        tip: '只有怀疑这份记录过时了、或换了权重才需要' },
+      { label: '取消', value: null },
+    ];
   }
 
-  const buttons = [];
+  /* ---------- 窗二：要不要续跑讲解（★ 后弹这个） ---------- */
+  let askCoach = false, coachBody = '', coachButtons = null;
   if (hasCoach) {
-    buttons.push({ label: '接着讲没讲过的（还剩 ' + (n - doneAt.length) + ' 手）',
-      value: { skipReview, fromScratch: false }, primary: true,
-      tip: '已经讲过的保留，只补还没讲的' });
-    buttons.push({ label: '从头重跑（抹掉已讲的 ' + doneAt.length + ' 手）',
-      value: { skipReview, fromScratch: true },
-      tip: '把已有讲解全部作废，从第一手重新讲一遍' });
-  } else {
-    buttons.push({ label: skipReview ? '跳过重算，直接开始讲' : '开始（先算整盘胜率）',
-      value: { skipReview, fromScratch: false }, primary: true,
-      tip: skipReview ? '沿用已有的胜率记录，省下重算的那几分钟' : '' });
-    if (hasRev) {
-      buttons.push({ label: '重新算一遍胜率（约 ' + estMin + ' 分钟）',
-        value: { skipReview: false, fromScratch: false },
-        tip: '只有怀疑胜率记录过时了才需要' });
-    }
+    askCoach = true;
+    coachBody = '<div class="ba-li">这份棋谱<b>已经讲过 '
+      + doneAt.length + ' / ' + n + ' 手</b>，还剩 <b>' + (n - doneAt.length) + '</b> 手。</div>'
+      + '<div class="ba-li ba-dim">「接着讲」会保留已经讲好的那些，只补还没讲的；'
+      + '「从头重跑」会把已有讲解<b>全部作废</b>，从第一手重新讲一遍（费时间）。</div>';
+    coachButtons = [
+      { label: '接着讲没讲过的（还剩 ' + (n - doneAt.length) + ' 手）',
+        value: { fromScratch: false }, primary: true,
+        tip: '已经讲过的保留，只补还没讲的' },
+      { label: '从头重跑（抹掉已讲的 ' + doneAt.length + ' 手）',
+        value: { fromScratch: true },
+        tip: '把已有讲解全部作废，从第一手重新讲一遍' },
+      { label: '取消', value: null },
+    ];
   }
-  buttons.push({ label: '取消', value: null });
 
-  return { hasRev, hasCoach, doneAt, estMin, skipReview, body: body.join(''), buttons };
+  return { hasRev, hasCoach, doneAt, estMin, askReview, revBody, revButtons, askCoach, coachBody, coachButtons };
 }
 
 async function runBatchCoach() {
@@ -8168,21 +8185,40 @@ async function runBatchCoach() {
   if (!n) { flash('这份棋谱里没有手顺，讲不了'); return; }
 
   /* ★★ 2026-10-14 首相要求：**别白算** —— 已经算过的、已经讲过的，先问一句再动手。
-     判定与文案都在 batchAskInfo（纯函数，好单测）；这里只负责弹窗和接结果。 */
+     两个窗**按顺序**弹：① 要不要重算整盘胜率 → ② 要不要续跑讲解（首相明确要求这个顺序）。 */
   const ask = batchAskInfo(n);
-  let skipReview = false;        // 默认「要算」；下面按用户的选择改
-  let fromScratch = false;
+  let skipReview = false;        // 默认「要算」；按用户在窗一里的选择改
+  let fromScratch = false;       // 默认「接着讲」；按用户在窗二里的选择改
   const doneAt = ask ? ask.doneAt : [];
   if (ask) {
-    const plan = await askBatchPlan({
-      title: '全盘讲解 · 这份棋谱已经算过一部分',
-      body: ask.body,
-      buttons: ask.buttons,
-      fallback: null,
-    });
-    if (!plan) return;                                   // 取消
-    skipReview = plan.skipReview;
-    fromScratch = plan.fromScratch;
+    /* ★ 重入保护：从「要弹窗了」这一刻就占住。
+       不占的后果（首相实测踩到）：连点两次「全盘讲解」→ 第二次进来又把弹窗重建一遍，
+       第一次那批按钮被 `innerHTML=''` 清掉 → **两个 Promise 都悬着，点哪个按钮都没反应**。 */
+    if (batchAsking) { flash('上一步还没选完 —— 请在弹窗里点一个按钮'); return; }
+    batchAsking = true;
+    const wasDisabled = $('btn-batch').disabled;
+    $('btn-batch').disabled = true;
+    try {
+      if (ask.askReview) {
+        const r1 = await askBatchPlan({
+          title: '全盘讲解 · 整盘胜率要不要重算？',
+          body: ask.revBody, buttons: ask.revButtons, fallback: null,
+        });
+        if (!r1) return;                       // 取消
+        skipReview = r1.skipReview;
+      }
+      if (ask.askCoach) {
+        const r2 = await askBatchPlan({
+          title: '全盘讲解 · 从哪里开始讲？',
+          body: ask.coachBody, buttons: ask.coachButtons, fallback: null,
+        });
+        if (!r2) return;                       // 取消
+        fromScratch = r2.fromScratch;
+      }
+    } finally {
+      batchAsking = false;
+      $('btn-batch').disabled = wasDisabled;
+    }
   }
 
   const gen = gameGen;

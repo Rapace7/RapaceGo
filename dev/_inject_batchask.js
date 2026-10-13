@@ -1,89 +1,119 @@
-/* 「全盘讲解前先问一句」的回归 —— 2026-10-14 首相要求。
+/* 「全盘讲解前先问一句」的回归 —— 2026-10-14 首相要求（当晚按首相实测反馈订正过一遍）。
  * 用法：node dev/_cdp_run2.mjs ./_inject_batchask.js 9333
  *
- * 首相原话（拆成三条规格）：
- *   ① 棋谱已经被 KataGo 全盘算过 → 点「全盘讲解」不该再重算，
- *      弹窗提示「已有全盘 AI 胜率记录」，说明这东西是干啥的，**推荐跳过**；
- *   ② 如果没有任何现有讲解 → **不问，直接跑**；
- *   ③ 如果已经有讲解 → 弹窗问「从头重跑」还是「从未讲的手继续」；
- *      重跑 = 抹掉所有已存在的，从第一手开始。
+ * 首相原话（拆成规格）：
+ *   ① 棋谱已经被 KataGo 全盘算过 → 不该再重算，弹窗说明「这东西是干啥的」并**推荐跳过**；
+ *   ② 没有任何现有讲解 → **不问，直接跑**；
+ *   ③ 已有讲解 → 弹窗问「从头重跑」还是「从未讲的手继续」；重跑 = 抹掉已有的、从第一手开始。
+ *   ④ ★ 当晚订正：**顺序**必须是「先问要不要重算（胜率）→ 再问要不要续跑（讲解）」；
+ *      而且首相实测报过「两个弹窗点啥都没反应」——
+ *      根因是弹窗被重建时把上一批按钮清了、两个 Promise 都悬着。
+ *      所以下面专门有一条**重现那个场景**的断言（BB7/BB8）。
  *
- * ★ 为什么这条脚本只测 `batchAskInfo()` 与弹窗本身，**不调 runBatchCoach()**：
- *   真跑一次全盘讲解要起 KataGo 整盘分析（几分钟）+ LoGos 逐手讲（更久），
- *   而且那条通路在前面几道闸门里就会开始发请求 —— 脚本会卡在那儿。
- *   判定逻辑已经抽成纯函数，直接把三种情况摆出来测即可。
+ * ★ 为什么这条脚本不调 runBatchCoach()：它前面几道闸门就要引擎就绪，真跑起来是
+ *   KataGo 整盘分析（几分钟）+ LoGos 逐手讲（更久），脚本会卡在那儿。
+ *   判定逻辑已抽成纯函数 batchAskInfo()，弹窗单独测 askBatchPlan() 即可覆盖。
  */
 (async function () {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const L = [];
   const ok = (n, c, g) => L.push((c ? 'PASS ' : 'FAIL ') + n + (g === undefined ? '' : '  [' + g + ']'));
+  const mask = () => document.getElementById('batchask');
+  const isOpen = () => !!mask() && mask().classList.contains('open');
+  const btns = () => [...mask().querySelectorAll('#ba-actions button')];
 
   settings.mode = 'free'; settings.size = 19; settings.handicap = 0; settings.rules = 'chinese';
   applyNewGame(); await sleep(200);
+  /* ★ 环境清场（2026-10-14 加了这条）：上一条脚本可能留了个**开着的**询问窗
+     （比如 `_inject_showask.js` 会故意弹出来挂着好截图）。
+     它开着的时候，本脚本后面的弹窗会被"双保险"正确地拒掉 —— 那是**环境污染，不是 bug**，
+     但会让 B21/B22/B23 假失败（实测踩过一次）。所以先把可能开着的关掉。 */
+  const m0 = document.getElementById('batchask');
+  if (m0) m0.classList.remove('open');
   for (const [x, y] of [[3, 15], [15, 3], [3, 3], [15, 15], [2, 13], [16, 9]]) tryPlay(x, y);
   await sleep(150);
   const n = state.moves.length;
-  ok('BA0 前置：6 手', n === 6, n);
+  ok('B0 前置：6 手', n === 6, n);
 
   const saveRev = state.review, saveEx = state.coach.explain, saveName = state.recName;
   state.recName = '自测-假棋谱.sgf';
 
-  /* ---------- ① 都没有 → 不问（返回 null），这正是首相要的「别问，直接跑」 ---------- */
+  /* ---------- ① 都没有 → 一个窗都不弹（首相要的「别问，直接跑」） ---------- */
   state.review = null; state.coach.explain = {};
-  ok('BA1 ★ 既没胜率也没讲解 → 不问（返回 null = 直接开跑）', batchAskInfo(n) === null);
+  ok('B1 ★ 既没胜率也没讲解 → 返回 null（不弹窗 = 直接开跑）', batchAskInfo(n) === null);
 
-  /* ---------- ② 只有胜率 → 问「跳过重算」，且**推荐项放第一位** ---------- */
+  /* ---------- ② 只有胜率 → **只该弹窗一** ---------- */
   state.review = { file: state.recName, history: new Array(n + 1).fill(0.5), leads: new Array(n + 1).fill(0) };
   let a = batchAskInfo(n);
-  ok('BA2 有胜率、没讲解 → 要问', !!a);
-  ok('BA3 ★ 推荐项 =「跳过重算」，在第一个',
-    !!a && a.buttons[0].label.indexOf('跳过重算') >= 0, a && a.buttons.map(b => b.label).join(' | '));
-  ok('BA4 推荐项的语义 = skipReview:true / fromScratch:false',
-    !!a && a.buttons[0].value.skipReview === true && a.buttons[0].value.fromScratch === false);
-  ok('BA5 ★ 正文说明了「胜率记录是干啥的」（提到"亏了多少"与"走势图"）',
-    !!a && a.body.indexOf('亏') >= 0 && a.body.indexOf('走势图') >= 0, a && a.body.slice(0, 80));
-  ok('BA6 备选里有「重新算一遍胜率」', !!a && a.buttons.some(b => b.label.indexOf('重新算') >= 0),
-    a && a.buttons.map(b => b.label).join(' | '));
-  ok('BA7 有「取消」，value 为 null',
-    !!a && a.buttons[a.buttons.length - 1].label === '取消' && a.buttons[a.buttons.length - 1].value === null);
+  ok('B2 有胜率 → 要弹窗一（askReview）', !!a && a.askReview === true);
+  ok('B3 没讲解 → **不弹**窗二（askCoach）', !!a && a.askCoach === false);
+  ok('B4 ★ 窗一推荐项 =「跳过重算，用现成的」（第一个）',
+    !!a && a.revButtons[0].label.indexOf('跳过重算') >= 0, a && a.revButtons.map(b => b.label).join(' | '));
+  ok('B5 窗一的推荐项语义 = skipReview:true', !!a && a.revButtons[0].value.skipReview === true);
+  ok('B6 ★ 窗一正文说清了「这份记录是干啥的」（提到"亏了多少"与"走势图"）',
+    !!a && a.revBody.indexOf('亏') >= 0 && a.revBody.indexOf('走势图') >= 0, a && a.revBody.slice(0, 70));
+  ok('B7 窗一备选里有「重新算一遍」', !!a && a.revButtons.some(b => b.label.indexOf('重新算') >= 0),
+    a && a.revButtons.map(b => b.label).join(' | '));
+  ok('B8 窗一有「取消」，value 为 null',
+    !!a && a.revButtons[a.revButtons.length - 1].label === '取消' && a.revButtons[a.revButtons.length - 1].value === null);
 
-  /* ---------- ③ 只有讲解 → 问「接着讲」还是「从头重跑」 ---------- */
+  /* ---------- ③ 只有讲解 → **只该弹窗二** ---------- */
   state.review = null;
   state.coach.explain = {};
   for (let i = 1; i <= 3; i++) state.coach.explain[i] = { cv: COACH_VER, head: 'h', body: 'b' };
   a = batchAskInfo(n);
-  ok('BA8 有讲解 → 要问', !!a);
-  ok('BA9 ★ 推荐项 =「接着讲没讲过的」，在第一个',
-    !!a && a.buttons[0].label.indexOf('接着讲') >= 0, a && a.buttons.map(b => b.label).join(' | '));
-  ok('BA10 「接着讲」的语义 = fromScratch:false', !!a && a.buttons[0].value.fromScratch === false);
-  const iS = a ? a.buttons.findIndex(b => b.label.indexOf('从头重跑') >= 0) : -1;
-  ok('BA11 有「从头重跑」项', iS >= 0, a && a.buttons.map(b => b.label).join(' | '));
-  ok('BA12 ★ 「从头重跑」的语义 = fromScratch:true', iS >= 0 && a.buttons[iS].value.fromScratch === true);
-  ok('BA13 正文报清了「讲过几手 / 还剩几手」',
-    !!a && a.body.indexOf('3 / 6') >= 0 && a.body.indexOf('还剩') >= 0, a && a.body.slice(0, 130));
+  ok('B9 有讲解 → 要弹窗二（askCoach）', !!a && a.askCoach === true);
+  ok('B10 没胜率 → **不弹**窗一（askReview）', !!a && a.askReview === false);
+  ok('B11 ★ 窗二推荐项 =「接着讲没讲过的」（第一个）',
+    !!a && a.coachButtons[0].label.indexOf('接着讲') >= 0, a && a.coachButtons.map(b => b.label).join(' | '));
+  ok('B12 窗二推荐项语义 = fromScratch:false', !!a && a.coachButtons[0].value.fromScratch === false);
+  const iS = a ? a.coachButtons.findIndex(b => b.label.indexOf('从头重跑') >= 0) : -1;
+  ok('B13 窗二有「从头重跑」项', iS >= 0, a && a.coachButtons.map(b => b.label).join(' | '));
+  ok('B14 ★ 窗二「从头重跑」语义 = fromScratch:true', iS >= 0 && a.coachButtons[iS].value.fromScratch === true);
+  ok('B15 窗二正文报清了「讲过几手 / 还剩几手」',
+    !!a && a.coachBody.indexOf('3 / 6') >= 0 && a.coachBody.indexOf('还剩') >= 0, a && a.coachBody.slice(0, 100));
 
-  /* ---------- ④ 两样都有 → 也得问，推荐仍是「接着讲」 ---------- */
+  /* ---------- ④ 两样都有 → 两个窗都要弹（顺序由 runBatchCoach 保证：先一后二） ---------- */
   state.review = { file: state.recName, history: new Array(n + 1).fill(0.5), leads: new Array(n + 1).fill(0) };
   a = batchAskInfo(n);
-  ok('BA14 两样都有 → 要问，推荐仍是「接着讲」', !!a && a.buttons[0].label.indexOf('接着讲') >= 0);
-  ok('BA15 两样都有时，正文把两者都写清楚了',
-    !!a && a.body.indexOf('整盘 AI 胜率') >= 0 && a.body.indexOf('逐手讲解') >= 0);
+  ok('B16 两样都有 → 两个窗都要弹', !!a && a.askReview === true && a.askCoach === true);
+  ok('B17 ★ 窗一是「重算」、窗二是「续跑」（首相要的顺序）',
+    !!a && a.revBody.indexOf('胜率') >= 0 && a.coachBody.indexOf('讲解') >= 0);
 
-  /* ---------- ⑤ 弹窗本身能开、按钮能点、能拿到返回值 ---------- */
-  const p = askBatchPlan({
-    title: 'T', body: '<b>x</b>',
+  /* ---------- ⑤ 弹窗本身：能开、按钮能点、值拿得到 ---------- */
+  let p = askBatchPlan({
+    title: '窗一', body: '<b>x</b>',
     buttons: [{ label: '甲', value: 1, primary: true }, { label: '乙', value: 2 }, { label: '取消', value: null }],
   });
   await sleep(140);
-  const mask = document.getElementById('batchask');
-  ok('BA16 弹窗真的开了（.open）', !!mask && mask.classList.contains('open'));
-  const bs = [...mask.querySelectorAll('#ba-actions button')];
-  ok('BA17 三个按钮都在，第一个是 primary',
-    bs.length === 3 && bs[0].classList.contains('primary'), bs.map(b => b.textContent).join('|'));
-  bs[1].click();
+  ok('B18 弹窗真的开了（.open）', isOpen());
+  ok('B19 三个按钮都在，第一个是 primary', btns().length === 3 && btns()[0].classList.contains('primary'),
+    btns().map(b => b.textContent).join('|'));
+
+  /* ---------- ⑥ ★★ 重现首相报的那个 bug：弹窗开着时再来一次 ---------- */
+  const p2 = askBatchPlan({ title: '窗二', body: 'y', buttons: [{ label: '丙', value: 3 }] });
+  const v2 = await p2;
+  await sleep(80);
+  ok('B20 ★ 弹窗开着时再请求弹窗 → 被拒（返回 null），不重建',
+    v2 === null, String(v2));
+  ok('B21 ★ 原来那批按钮**还在**（没被清掉）—— 这是「点啥都没反应」的病根',
+    btns().length === 3 && btns()[0].textContent === '甲', btns().map(b => b.textContent).join('|'));
+  ok('B22 标题也没被后一个覆盖', mask().querySelector('#ba-title').textContent === '窗一',
+    mask().querySelector('#ba-title').textContent);
+
+  /* ---------- ⑦ 真点一个按钮：能拿到值、弹窗关闭 ---------- */
+  btns()[1].click();
   const v = await p;
   await sleep(90);
-  ok('BA18 点「乙」拿到 2，弹窗同时关闭', v === 2 && !mask.classList.contains('open'), String(v));
+  ok('B23 点「乙」拿到 2，弹窗同时关闭', v === 2 && !isOpen(), String(v));
+
+  /* ---------- ⑧ 关了之后还能再弹下一个窗（顺序链要能走通） ---------- */
+  p = askBatchPlan({ title: '窗二', body: 'y', buttons: [{ label: '丙', value: 3, primary: true }, { label: '取消', value: null }] });
+  await sleep(140);
+  ok('B24 上一个窗关掉后，下一个窗能正常弹出来', isOpen() && btns().length === 2,
+    btns().map(b => b.textContent).join('|'));
+  btns()[0].click();
+  ok('B25 第二个窗也能拿到值', (await p) === 3);
 
   /* 还原现场 */
   state.review = saveRev; state.coach.explain = saveEx; state.recName = saveName;
