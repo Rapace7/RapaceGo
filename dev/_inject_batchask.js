@@ -142,5 +142,42 @@
   /* 还原现场 */
   state.review = saveRev; state.coach.explain = saveEx; state.recName = saveName;
   applyNewGame(); await sleep(150);
+  /* ---------- ⑨ ★★ 复盘记录里必须带「候选点」----------
+     这是「跳过重算也能讲」的全部前提。首相实测：「我已经重算一遍了，为什么还显示这份是旧版的？」
+     —— 根因是 `runBatchCoach` 里那步整盘分析算完**只填内存、不落盘**（已修），
+     所以这里把"记录里到底有没有候选点"写成断言，别再让那条路悄悄断。 */
+  const fakeTurns = [];
+  for (let i = 0; i <= n; i++) {
+    fakeTurns.push({
+      root: { winrate: 0.5, scoreLead: 0, currentPlayer: i % 2 ? 'W' : 'B' },
+      moves: [
+        { move: 'C17', winrate: 0.288, scoreLead: 1.2, order: 0 },
+        { move: 'D4', winrate: 0.25, scoreLead: 0.5, order: 1 },
+        { move: 'Q16', winrate: 0.2, scoreLead: -0.3, order: 2 },
+        { move: 'R5', winrate: 0.1, scoreLead: -2, order: 3 },
+      ],
+      actualMove: 'C17',
+    });
+  }
+  const rep = buildReview(n, fakeTurns);
+  ok('B26 ★ 复盘记录里带 cands（没有它，「跳过重算」必然讲不了）',
+    Array.isArray(rep.cands), typeof rep.cands);
+  /* ⚠️ cands 的长度 = **手数**（每一项是"第 t 手之前"那个局面的候选），
+     不是 history 的 `手数+1` —— 末尾那个"最后一手之后"的局面讲解用不到。 */
+  ok('B27 ★ cands 每手存前 3 个，格式 [坐标, 胜率]',
+    !!rep.cands && rep.cands.length === n && rep.cands[0].length === 3
+    && rep.cands[0][0][0] === 'C17' && typeof rep.cands[0][0][1] === 'number',
+    rep.cands && (rep.cands.length + ' 项 / 第1项=' + JSON.stringify(rep.cands[0])));
+  ok('B28 cands 按 order 排（首选在前）',
+    !!rep.cands && rep.cands[0].map(x => x[0]).join(',') === 'C17,D4,Q16',
+    rep.cands && rep.cands[0].map(x => x[0]).join(','));
+  ok('B29 记录版本号升到 v3（老记录是 v2 —— 靠它区分"有没有候选点"）',
+    rep.v === 3, String(rep.v));
+  ok('B30 cands 能还原成讲解要的 turns 形状（moves[0] 就是首选，带胜率）', (function () {
+    if (!rep.cands || !rep.cands[0]) return false;
+    const t = { moves: rep.cands[0].map((p, k) => ({ move: p[0], winrate: p[1], order: k })) };
+    return t.moves[0].move === 'C17' && t.moves[0].winrate === 0.288;
+  })());
+
   return L.join('\n');
 })();
