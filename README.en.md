@@ -521,6 +521,10 @@ which build you are running:
   but there you'd typically just point Settings at the Homebrew `katago`.
 - **The all-in-one package (懒人包)**: already configured; if you still see this, open an Issue
   with a screenshot of the paths in Settings.
+  👉 **[Download it from Quark netdisk](https://pan.quark.cn/s/549e9dcc7d99?pwd=Svze)** — passcode `Svze`.
+  ~8.5 GB; ships with **both** KataGo builds (NVIDIA + generic; the app picks) and the LoGos
+  commentary model. Unzip, double-click `RapaceGo.exe`, done — zero setup.
+  (GitHub caps a single release asset at 2 GB, so the full package lives on the netdisk.)
 
 **"I can't see my downloaded weights in the file picker"?**
 The app accepts **`.bin.gz` and `.bin`**. Some hosts (Quark) won't share archives, so people
