@@ -8042,6 +8042,104 @@ async function loadCoachForRecord(name) {
     + ' —— 点手数列表就能看');
 }
 
+/* ---- 全盘讲解开跑前的询问窗（2026-10-14 首相要求）----
+ *
+ * 首相原话（拆成三条规格）：
+ *   ① 棋谱如果已经被 KataGo 全盘算过，点「全盘讲解」不该再重算一遍 ——
+ *      **弹窗提示已有全盘 AI 胜率记录、说明这东西是干啥的、推荐跳过以省时间**；
+ *   ② 如果没有任何现有讲解 → **别问，直接跑**；
+ *   ③ 如果已经有讲解 → 弹窗问「从头重跑」还是「从未讲的手继续」；
+ *      重跑 = 抹掉所有已有的，从第一手开始。
+ *
+ * 返回 Promise：`{ skipReview, fromScratch }`，取消则返回 null。
+ * 为什么不复用 `confirm()`：Electron 里 confirm 是**阻塞式原生框**，
+ * 会把整个渲染进程卡住（连进度条都不动），而且措辞没法控制 —— 首相要的是「说清这东西是干啥的」。 */
+function askBatchPlan(info) {
+  return new Promise(resolve => {
+    const mask = $('batchask');
+    if (!mask) { resolve(info.fallback || null); return; }
+    $('ba-title').textContent = info.title;
+    $('ba-body').innerHTML = info.body;
+    const acts = $('ba-actions');
+    acts.innerHTML = '';
+    const finish = v => { mask.classList.remove('open'); resolve(v); };
+    for (const b of info.buttons) {
+      const el = document.createElement('button');
+      el.textContent = b.label;
+      if (b.primary) el.className = 'primary';
+      if (b.tip) el.title = b.tip;
+      el.onclick = () => finish(b.value);
+      acts.appendChild(el);
+    }
+    mask.classList.add('open');
+  });
+}
+
+/* ---- 开跑前「要不要先问一句」以及问什么（2026-10-14 首相要求）----
+ *
+ * 抽成**纯函数**（只读 state，不碰引擎、不弹窗）的两个理由：
+ *   ① 好单测 —— 断言直接调它就能把三种情况全覆盖，不必真去跑整盘分析（那要几分钟）；
+ *   ② runBatchCoach 只需拿它的结果去弹窗，逻辑不再埋在长函数中间。
+ *
+ * 返回 null = **不用问**（两样都没有，首相要求直接开跑）；
+ * 否则返回 { hasRev, hasCoach, doneAt, estMin, skipReview, body, buttons }。
+ *
+ * 三条规格（首相原话）：
+ *   ① 已有整盘 AI 胜率记录 → 问「是否跳过重算」，说明它是干啥的，**推荐跳过**；
+ *   ② 没有任何现有讲解 → **不问**，直接跑；
+ *   ③ 已有讲解 → 问「从头重跑」还是「从未讲的手继续」；重跑 = 抹掉已有的、从第一手开始。 */
+function batchAskInfo(n) {
+  const doneAt = [];
+  for (let at = 1; at <= n; at++) if (coachVerOK(state.coach.explain[at])) doneAt.push(at);
+  const hasCoach = doneAt.length > 0;
+  const hasRev = !!(state.review && state.review.file === state.recName
+    && Array.isArray(state.review.history) && state.review.history.length > 1);
+  if (!hasRev && !hasCoach) return null;               // ★ 都没 → 不问
+
+  const estMin = Math.max(1, Math.round(n / 60));      // 粗估：整盘分析约 n/60 分钟
+  const skipReview = hasRev;                           // 默认沿用现成的
+  const body = [];
+  if (hasRev) {
+    body.push('<div class="ba-li">· <b>整盘 AI 胜率</b>：<b>已经有了</b>（'
+      + (state.review.history.length - 1) + ' 手）。<span class="ba-dim">它给每一手算出胜率，'
+      + '用来标「这一手亏了多少」、也用来画右边的走势图。</span></div>');
+  } else {
+    body.push('<div class="ba-li">· <b>整盘 AI 胜率</b>：还没有 —— 会先让 KataGo 把整盘算一遍。'
+      + '<span class="ba-dim">大约 ' + estMin + ' 分钟；这是逐手讲解的前置，'
+      + '没有它就不知道每一手好在哪、差在哪。</span></div>');
+  }
+  body.push(hasCoach
+    ? '<div class="ba-li">· <b>逐手讲解</b>：已经讲过 <b>' + doneAt.length + ' / ' + n
+      + '</b> 手，还剩 <b>' + (n - doneAt.length) + '</b> 手。</div>'
+    : '<div class="ba-li">· <b>逐手讲解</b>：还没有。</div>');
+  if (hasRev) {
+    body.push('<div class="ba-li ba-dim">· 已有的胜率记录可以直接用，<b>建议跳过重算</b>'
+      + (hasCoach ? '' : '，能省下 ' + estMin + ' 分钟') + '。</div>');
+  }
+
+  const buttons = [];
+  if (hasCoach) {
+    buttons.push({ label: '接着讲没讲过的（还剩 ' + (n - doneAt.length) + ' 手）',
+      value: { skipReview, fromScratch: false }, primary: true,
+      tip: '已经讲过的保留，只补还没讲的' });
+    buttons.push({ label: '从头重跑（抹掉已讲的 ' + doneAt.length + ' 手）',
+      value: { skipReview, fromScratch: true },
+      tip: '把已有讲解全部作废，从第一手重新讲一遍' });
+  } else {
+    buttons.push({ label: skipReview ? '跳过重算，直接开始讲' : '开始（先算整盘胜率）',
+      value: { skipReview, fromScratch: false }, primary: true,
+      tip: skipReview ? '沿用已有的胜率记录，省下重算的那几分钟' : '' });
+    if (hasRev) {
+      buttons.push({ label: '重新算一遍胜率（约 ' + estMin + ' 分钟）',
+        value: { skipReview: false, fromScratch: false },
+        tip: '只有怀疑胜率记录过时了才需要' });
+    }
+  }
+  buttons.push({ label: '取消', value: null });
+
+  return { hasRev, hasCoach, doneAt, estMin, skipReview, body: body.join(''), buttons };
+}
+
 async function runBatchCoach() {
   if (state.coach.batch) { flash('全盘讲解正在跑 —— 想停就点进度条右边的「停止」'); return; }
   /* ★ 反过来也要挡（2026-10-06 审查发现）：单条讲解（分析讲解 / 选点讲解）正在跑时，
@@ -8069,60 +8167,100 @@ async function runBatchCoach() {
   const n = state.moves.length;
   if (!n) { flash('这份棋谱里没有手顺，讲不了'); return; }
 
+  /* ★★ 2026-10-14 首相要求：**别白算** —— 已经算过的、已经讲过的，先问一句再动手。
+     判定与文案都在 batchAskInfo（纯函数，好单测）；这里只负责弹窗和接结果。 */
+  const ask = batchAskInfo(n);
+  let skipReview = false;        // 默认「要算」；下面按用户的选择改
+  let fromScratch = false;
+  const doneAt = ask ? ask.doneAt : [];
+  if (ask) {
+    const plan = await askBatchPlan({
+      title: '全盘讲解 · 这份棋谱已经算过一部分',
+      body: ask.body,
+      buttons: ask.buttons,
+      fallback: null,
+    });
+    if (!plan) return;                                   // 取消
+    skipReview = plan.skipReview;
+    fromScratch = plan.fromScratch;
+  }
+
   const gen = gameGen;
   state.coach.batch = { done: 0, total: n };
   batchStop = false;
   $('btn-batch').disabled = true;
   $('btn-explain').disabled = true;      // 批量期间不许插队（会和批量抢 coachSeq）
   $('btn-pick').disabled = true;
-  setBatchBar(true, 0, n, '正在让 KataGo 把整盘算一遍…');
+  setBatchBar(true, 0, n, skipReview
+    ? '沿用已有的整盘胜率，直接开始逐手讲解…'
+    : '正在让 KataGo 把整盘算一遍…');
   /* 这一步占着引擎：把自动分析压住，否则两边抢同一个进程、谁也算不完。
-     （同时靠 state.coach.batch 让「复盘进度」弹窗别冒出来 —— 见文件后面那条订阅。） */
-  reviewBusy = true;
+     （同时靠 state.coach.batch 让「复盘进度」弹窗别冒出来 —— 见文件后面那条订阅。）
+     ★ 2026-10-14：走 skipReview 时**根本不发请求**、不占引擎，所以不必置 reviewBusy。 */
+  if (!skipReview) reviewBusy = true;
   try {
-    /* ---------- ① KataGo：整盘逐手算一遍 ---------- */
-    const req = {
-      initialStones: state.setup.map(s => [s.color === 'b' ? 'B' : 'W', toGTP(s.x, s.y)]),
-      moves: state.moves.map(m => [m.color === 'b' ? 'B' : 'W', m.pass ? 'pass' : toGTP(m.x, m.y)]),
-      rules: (RULES[settings.rules] || RULES.chinese).kata,
-      komi: settings.komi,
-      size: N,
-      maxVisits: reviewVisits(),
-      analyzeTurns: Array.from({ length: n + 1 }, (_, i) => i),
-    };
-    let res = null;
-    try { res = await window.api.review(req); } catch (e) { res = { error: String(e) }; }
-    reviewBusy = false;
-    if (gen !== gameGen) return;         // 期间换了棋谱 → 整体作废（finally 会收拾界面）
-    if (!res || res.error || !res.turns || res.turns.length < 2) {
-      flash('整盘分析失败：' + ((res && res.error) || '引擎没给出结果'));
-      return;
+    /* ---------- ① KataGo：整盘逐手算一遍 ----------
+       ★★ 2026-10-14 首相要求：已有胜率记录、且用户在弹窗里选了「跳过重算」→
+          **这一步整个不跑**，直接用现有的 history / leads / histVisits（省下几分钟）。
+          `turns` 在后面只用来定「讲到第几手」（超时兜底那段要看它的长度），
+          所以这里造一个**等长的占位数组**就行 ——
+          ⚠️ 不要伪造 winrate：那会被下面当成真数据写进 history。 */
+    let turns;
+    if (skipReview) {
+      turns = new Array(Math.max(2, Math.min(state.history.length, n + 1))).fill(null);
+    } else {
+      const req = {
+        initialStones: state.setup.map(s => [s.color === 'b' ? 'B' : 'W', toGTP(s.x, s.y)]),
+        moves: state.moves.map(m => [m.color === 'b' ? 'B' : 'W', m.pass ? 'pass' : toGTP(m.x, m.y)]),
+        rules: (RULES[settings.rules] || RULES.chinese).kata,
+        komi: settings.komi,
+        size: N,
+        maxVisits: reviewVisits(),
+        analyzeTurns: Array.from({ length: n + 1 }, (_, i) => i),
+      };
+      let res = null;
+      try { res = await window.api.review(req); } catch (e) { res = { error: String(e) }; }
+      reviewBusy = false;
+      if (gen !== gameGen) return;         // 期间换了棋谱 → 整体作废（finally 会收拾界面）
+      if (!res || res.error || !res.turns || res.turns.length < 2) {
+        flash('整盘分析失败：' + ((res && res.error) || '引擎没给出结果'));
+        return;
+      }
+      /* ★ 整盘分析**超时**时 main.js 会带 `incomplete: true` 交回「已经算到的那些回合」
+         （见 analyze 的超时兜底）。这种情况只能讲算到的部分，而且要如实说明 ——
+         原来只看 `turns.length >= 2` 就照跑到底，末尾还报「讲了 N 手」，
+         实际有几手因为没数据被跳过（2026-10-06 审查发现）。 */
+      if (res.incomplete) {
+        flash('KataGo 整盘没算完（超时）—— 这次只讲算到的部分，回头再点一次会接着讲');
+      }
+      turns = res.turns;
+      /* 顺手把胜率走势填满（引擎给的是「轮到谁走」视角，要换算成黑方视角）——
+         这样手数列表的「涨跌」和走势图也一起活了，讲解里说的胜率能跟它们对上。 */
+      const isWhiteTurn = x => String(((x && x.root) || {}).currentPlayer || '').toUpperCase() === 'W';
+      state.history = turns.map(x => {
+        const wr = x && x.root && x.root.winrate;
+        return (typeof wr === 'number') ? (isWhiteTurn(x) ? 1 - wr : wr) : undefined;
+      });
+      state.leads = turns.map(x => {
+        const sl = x && x.root && x.root.scoreLead;
+        return (typeof sl === 'number') ? (isWhiteTurn(x) ? -sl : sl) : undefined;
+      });
+      /* ★ 同上：整盘讲解也是同一档搜索量一次算完的，精度标记统一填上 */
+      state.histVisits = turns.map(() => reviewVisits());
+      renderMoveList();
+      renderCurve();
     }
-    /* ★ 整盘分析**超时**时 main.js 会带 `incomplete: true` 交回「已经算到的那些回合」
-       （见 analyze 的超时兜底）。这种情况只能讲算到的部分，而且要如实说明 ——
-       原来只看 `turns.length >= 2` 就照跑到底，末尾还报「讲了 N 手」，
-       实际有几手因为没数据被跳过（2026-10-06 审查发现）。 */
-    if (res.incomplete) {
-      flash('KataGo 整盘没算完（超时）—— 这次只讲算到的部分，回头再点一次会接着讲');
-    }
-    const turns = res.turns;
-    /* 顺手把胜率走势填满（引擎给的是「轮到谁走」视角，要换算成黑方视角）——
-       这样手数列表的「涨跌」和走势图也一起活了，讲解里说的胜率能跟它们对上。 */
-    const isWhiteTurn = x => String(((x && x.root) || {}).currentPlayer || '').toUpperCase() === 'W';
-    state.history = turns.map(x => {
-      const wr = x && x.root && x.root.winrate;
-      return (typeof wr === 'number') ? (isWhiteTurn(x) ? 1 - wr : wr) : undefined;
-    });
-    state.leads = turns.map(x => {
-      const sl = x && x.root && x.root.scoreLead;
-      return (typeof sl === 'number') ? (isWhiteTurn(x) ? -sl : sl) : undefined;
-    });
-    /* ★ 同上：整盘讲解也是同一档搜索量一次算完的，精度标记统一填上 */
-    state.histVisits = turns.map(() => reviewVisits());
-    renderMoveList();
-    renderCurve();
 
-    /* ---------- ② LoGos：逐手讲（讲过的跳过，所以能接着上次继续） ---------- */
+    /* ---------- ② LoGos：逐手讲 ---------- */
+    /* ★ 2026-10-14 首相要求：用户在弹窗里选了「从头重跑」→ **抹掉已有的讲解**，从第一手开始讲。
+       为什么放在这里、而不是弹窗一回来就抹：弹窗之后还有几道闸门（整盘分析失败、中途换棋谱），
+       那些情况都不该先把用户的讲解删掉。**走到这一步 = 真的要开讲了**，这时才抹。
+       （落盘发生在讲完之后的保存里，所以此刻只动内存 —— 中途停止不会破坏磁盘上那份。） */
+    if (fromScratch && doneAt.length) {
+      for (const at of doneAt) delete state.coach.explain[at];
+      coachRenderedAt = -999;
+      flash('已抹掉原来讲过的 ' + doneAt.length + ' 手，从头开始重讲');
+    }
     const todo = [];
     /* ★ 上限取 min(手数, 已算到的回合数) —— 超时的情况只讲有数据的那些手，
        免得后面每一手都走到「没算出候选点」、空转一遍还被算进完成数（见上面的 incomplete 判断）。 */

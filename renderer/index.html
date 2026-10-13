@@ -291,6 +291,21 @@
 </footer>
 
 <!-- 新对局设置 -->
+<!-- 全盘讲解前的询问窗（2026-10-14 首相要求）。
+     ★ 为什么要有它：整盘 KataGo 分析要几分钟、逐手讲更慢，
+       而**这两样都存盘了**（`<棋谱名>.review.json` / `.coach.json`），本来就不必重来。
+       以前点「全盘讲解」无条件先跑一遍整盘分析 —— 已经算过的棋谱纯白等。
+     触发条件（见 runBatchCoach）：
+       · 已有胜率记录 或 已有讲解 → 弹这个窗问一句；
+       · 两样都没有 → **不问**，直接跑（首相明确要求）。 -->
+<div class="modal-mask" id="batchask">
+  <div class="modal">
+    <h2 id="ba-title">全盘讲解</h2>
+    <div id="ba-body" class="ba-body"></div>
+    <div class="mrow ba-actions" id="ba-actions"></div>
+  </div>
+</div>
+
 <div class="modal-mask" id="newgame">
   <div class="modal">
     <h2>新对局</h2>
