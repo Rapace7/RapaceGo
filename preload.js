@@ -96,6 +96,9 @@ contextBridge.exposeInMainWorld('api', {
        → { canceled:true } | { ok:true, imported:[文件名], failed:[原因] } | { error } */
     importSgf: ()     => ipcRenderer.invoke('records:import'),
     setNote: (name, note) => ipcRenderer.invoke('records:setNote', name, note),
+    /* ★ 改棋手名（PB/PW）—— 只动这两个字段，文件其余部分保留。
+       打谱时点名字改完要立刻写回，不然重开还是老名字（2026-10-12 用户报的 bug）。 */
+    setPlayers: (name, pb, pw) => ipcRenderer.invoke('records:setPlayers', name, pb, pw),
     saveReview: (name, json) => ipcRenderer.invoke('records:saveReview', name, json),
     readReview: name => ipcRenderer.invoke('records:readReview', name),
     /* ★ 全盘讲解的结果（逐手存下来的一整盘）—— 跟棋谱存在一起，下次打开直接就有 */

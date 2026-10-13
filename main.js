@@ -1273,7 +1273,10 @@ function createWindow() {
    `-make-shortcut` 是一次性工具：创建完就退出，不开窗口、不启动引擎。 */
 function makeDesktopShortcut() {
   if (process.platform !== 'win32') return { error: '只在 Windows 上支持' };
-  const name = 'RapaceGo';       // 桌面快捷方式名，跟 exe 一致
+  /* ★ 快捷方式名一律用**中文**（与 RapaceXiangqi / RapaceChess 统一）——
+     用户 2026-10-11 明确要求三家在桌面上都显示「玄清XX」。
+     改前这里是 'RapaceGo'（英文），桌面上跟另两款不一致、一眼看不出是一家的。 */
+  const name = '玄清围弈';
   /* 落点默认是桌面。★ `RAPACEGO_SHORTCUT_OUT` 可覆盖 —— 自动化测试时指向项目内的
      _trash/：命令沙箱不允许子进程写项目外的目录，那时 writeShortcutLink 会**返回 false**
      （不抛错，所以不看返回值会以为是「成功但没生效」——这个坑记一下）。 */
@@ -1395,6 +1398,23 @@ function readNote(file) {
   } catch (e) { return ''; }
 }
 
+/* ★★ 2026-10-13：只读 `<棋谱名>.coach.json` **开头一小段**，把讲解的**格式版本号**取出来。
+   为什么必须有它：讲解有格式版本（COACH_VER，改了讲法就 +1，旧讲解作废）。
+   原来列表只判断「文件在不在」（`hasCoach`），于是**用户实测撞到**：
+   「棋谱库里显示带讲解，打开却是空的」—— 其实是被新版本作废了，但界面没说。
+   只读前 400 字节：整份 JSON 可能有几十 KB（217 手那份 45 KB），列表里读不起。 */
+function coachVerOf(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(400);
+      const n = fs.readSync(fd, buf, 0, 400, 0);
+      const m = /"cv"\s*:\s*(\d+)/.exec(buf.slice(0, n).toString('utf8'));
+      return m ? Number(m[1]) : 0;         // 0 = 老格式（没有版本号）
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return -1; }               // -1 = 读不出来
+}
+
 ipcMain.handle('records:list', () => {
   try {
     return fs.readdirSync(RECORDS_DIR)
@@ -1402,9 +1422,13 @@ ipcMain.handle('records:list', () => {
       .map(f => {
         const full = path.join(RECORDS_DIR, f);
         const st = fs.statSync(full);
+        const cf = full + '.coach.json';
+        const hasCoach = fs.existsSync(cf);
         return { name: f, note: readNote(full), size: st.size, mtime: st.mtimeMs,
                  hasReview: fs.existsSync(full + '.review.json'),
-                 hasCoach: fs.existsSync(full + '.coach.json') };
+                 hasCoach: hasCoach,
+                 /* ★ 渲染进程拿它跟自己那边的 COACH_VER 比 —— 对不上就是「旧版讲解，要重讲」 */
+                 coachVer: hasCoach ? coachVerOf(cf) : -1 };
       })
       .sort((a, b) => b.mtime - a.mtime);          // 最近改的排前面
   } catch (e) { return []; }
@@ -1481,6 +1505,18 @@ function writeTextSmart(p, text) {
   return { enc: 'gbk', missing };
 }
 
+/* ★★ 坑位 43（2026-10-13 审查补）：覆盖棋谱前的一次性备份，抽成函数。
+   原来这段只写在 `records:save` 里，后来新增的两条**也会改棋谱**的路
+   （`setNote` 改 GN、`setPlayers` 改 PB/PW）没跟着用 —— 于是「改名改没了想捞回来」根本没有副本。
+   用户下载来的棋谱是不可再生的东西，**凡是往棋谱文件上落刀就得先留 .bak**，
+   这条不该靠每个 handler 自己记得。同名 .bak 已存在就不动（只留最早那一份）。 */
+function backupRecordOnce(full) {
+  try {
+    if (fs.existsSync(full) && !fs.existsSync(full + '.bak')) fs.copyFileSync(full, full + '.bak');
+    return fs.existsSync(full + '.bak');
+  } catch (e) { return false; }          // 备份失败不阻止保存，但如实报（backedUp:false）
+}
+
 ipcMain.handle('records:read', (_e, name) => {
   try {
     return { ok: true, text: readTextSmart(path.join(RECORDS_DIR, safeRecName(name))) };
@@ -1496,17 +1532,16 @@ ipcMain.handle('records:save', (_e, name, text) => {
        虽然我们只替换那一个属性（见 app.js 的 patchSGFComment），但用户下载来的棋谱
        是**不可再生**的东西 —— 万一哪里判错位置，得有一份能捞回来。
        只在**第一次覆盖**时留（.bak 已存在就不动），所以不会一堆副本。
-       新文件（本来不存在）不需要备份。 */
-    if (fs.existsSync(full) && !fs.existsSync(full + '.bak')) {
-      try { fs.copyFileSync(full, full + '.bak'); } catch (err) { /* 备份失败不阻止保存，但下面要如实报告 */ }
-    }
+       新文件（本来不存在）不需要备份。
+       2026-10-13：这段抽成了 `backupRecordOnce()`，三条往棋谱上落刀的路共用。 */
+    const backedUp = backupRecordOnce(full);
     /* ★★ 必须按**原编码**写回（GBK 棋谱不能被改成 UTF-8，详见 readTextSmart 上面的说明）。 */
     const wr = writeTextSmart(full, String(text));
     return {
       ok: true, name: f, dir: RECORDS_DIR,
-      backedUp: fs.existsSync(full + '.bak'),
+      backedUp: backedUp,
       enc: wr.enc,
-      missing: wr.missing                                // GBK 编不出来的字（如 emoji）
+      missing: wr.missing                               // GBK 编不出来的字（如 emoji）
     };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 });
@@ -1615,7 +1650,16 @@ ipcMain.handle('records:import', async () => {
     for (const src of r.filePaths) {
       const base = path.basename(src);
       try {
-        const text = fs.readFileSync(src, 'utf8');
+        /* ★★ 坑位 43 同源（这条是**老代码**，不是本轮改出来的，但同一个毛病）：
+           原来 `readFileSync(src,'utf8')` + `writeFileSync(...,'utf8')` ——
+           GBK 棋谱在**导入那一刻**中文就被解码成 U+FFFD 了，比 setPlayers 更狠（原件还在源目录，
+           但拷进棋谱库的这份已经废了）。改成：**校验用解码后的文本，落盘用原始字节** ——
+           编码原样保留，MultiGo / CGoban 打开都不乱。 */
+        const buf = fs.readFileSync(src);
+        const text = (() => {
+          if (looksUtf8(buf)) return buf.toString('utf8');
+          try { return new TextDecoder('gbk').decode(buf); } catch (e) { return buf.toString('utf8'); }
+        })();
         if (!/\(\s*;/.test(text) || !/\bGM\[1\]/.test(text)) { failed.push(base + '（不像 SGF）'); continue; }
         let name = safeRecName(base);
         if (fs.existsSync(path.join(RECORDS_DIR, name))) {
@@ -1624,7 +1668,7 @@ ipcMain.handle('records:import', async () => {
           while (fs.existsSync(path.join(RECORDS_DIR, stem + ' (' + i + ').sgf'))) i += 1;
           name = stem + ' (' + i + ').sgf';
         }
-        fs.writeFileSync(path.join(RECORDS_DIR, name), text, 'utf8');
+        fs.writeFileSync(path.join(RECORDS_DIR, name), buf);   // ★ 原字节落盘（见上面坑位 43）
         imported.push(name);
       } catch (e) {
         failed.push(base + '（' + ((e && e.message) || e) + '）');
@@ -2148,12 +2192,51 @@ ipcMain.handle('records:setDir', (_e, dir) => {
 ipcMain.handle('records:setNote', (_e, name, note) => {
   try {
     const full = path.join(RECORDS_DIR, safeRecName(name));
-    let text = fs.readFileSync(full, 'utf8');
+    /* ★★ 坑位 43（2026-10-13 审查补）：这里原来是 `readFileSync(..., 'utf8')` +
+       `writeFileSync(..., 'utf8')` —— 对 GBK 棋谱就是**双重破坏**：
+       GBK 字节按 UTF-8 解码得到 U+FFFD（信息当场没了），再按 UTF-8 写回，
+       整份文件的中文从此不可恢复（实测：解说词「这一手是中国流的起手」变成「拷锟劫…」），
+       而且这条路原来还**不留 .bak**。改成 readTextSmart / writeTextSmart / backupRecordOnce，
+       与 records:save 同一条纪律。 */
+    backupRecordOnce(full);
+    let text = readTextSmart(full);
     const clean = String(note || '').replace(/[\[\]\\]/g, ' ').trim();
     if (/GN\[[^\]]*\]/.test(text)) text = text.replace(/GN\[[^\]]*\]/, 'GN[' + clean + ']');
     else text = text.replace(/^\(\s*;/, m => m + 'GN[' + clean + ']');
-    fs.writeFileSync(full, text, 'utf8');
-    return { ok: true, note: clean };
+    const wr = writeTextSmart(full, text);
+    return { ok: true, note: clean, enc: wr.enc, missing: wr.missing };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+});
+
+/* ★ 写「双方棋手名」：只改 SGF 里的 PB / PW 两个字段，**文件其余部分一字不动**。
+   （GN 备注、C[] 解说词、AP、让子 AB/AW 全部保留 —— 实测那份棋谱就带着
+   GN[符创保VS赵文博] 这个备注，整份重写会把它冲掉。）
+
+   ★★ 2026-10-12 用户报的 bug：打谱时点名字改名，界面上变了、**文件里没变**，
+   重开还是 PLAYER1/PLAYER2，改几次都白改。
+   原因：改名只写进了内存的 state.names，而唯一会落盘的那条路
+   （app.js 的 saveToRecords）只在"下完棋点保存"时才走，打谱时压根不会触发。
+   现在渲染进程改完名字直接调这个 handler 写回文件。 */
+ipcMain.handle('records:setPlayers', (_e, name, pb, pw) => {
+  try {
+    const full = path.join(RECORDS_DIR, safeRecName(name));
+    /* ★★ 坑位 43（2026-10-13 审查补 · 同一族）：原来这里是 utf8 直读直写、还不留备份，
+       对 GBK 棋谱（本机抽样 800 份里有 481 份是 GBK —— 见上面「中文棋谱的编码」那段实测）
+       等于「改一次棋手名 = 永久损坏整份文件的中文，且没有副本」。
+       现在与 records:save 同纪律：先留 .bak、readTextSmart 读、writeTextSmart 按原编码写回。 */
+    if (!fs.existsSync(full)) return { error: '找不到这份棋谱：' + name };
+    backupRecordOnce(full);
+    let text = readTextSmart(full);
+    const cl = v => String(v || '').replace(/[\[\]\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 24);
+    const set = (t, key, val) => {
+      const re = new RegExp(key + '\\[[^\\]]*\\]');
+      if (re.test(t)) return t.replace(re, key + '[' + val + ']');
+      /* 没这个字段 → 插到根节点开头（和 setNote 一个思路） */
+      return t.replace(/^\(\s*;/, m => m + key + '[' + val + ']');
+    };
+    text = set(set(text, 'PB', cl(pb)), 'PW', cl(pw));
+    const wr = writeTextSmart(full, text);
+    return { ok: true, enc: wr.enc, missing: wr.missing };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 });
 

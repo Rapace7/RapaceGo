@@ -148,10 +148,16 @@ const out = await js(`(async function(){
   await step('棋谱库 · 打开一份棋谱', async () => { $('btn-records').click(); await sleep(600);
     const li = document.querySelector('#reclist li');
     if (!li) { $('rec-close').click(); return '（库里没棋谱，跳过）'; }
-    li.querySelector('button').click(); await sleep(1200);
+    /* ★ 判空要到「按钮」这一层：空库时第一行 li 可能是提示行，它**没有 button** ——
+       早先这里直接 li.querySelector('button').click()，于是每次跑冒烟都报一条
+       「Cannot read properties of null (reading 'click')」的假失败（不是产品缺陷）。 */
+    const b0 = li.querySelector('button');
+    if (!b0) { $('rec-close').click(); return '（第一行没有按钮 —— 空库提示行，跳过）'; }
+    b0.click(); await sleep(1200);
     return '载入 ' + state.moves.length + ' 手 · mode=' + settings.mode + ' 名字=' + (state.names.b || '—') + '/' + (state.names.w || '—'); });
   await step('棋谱库 · 复盘报告（读已存的）', async () => { $('btn-records').click(); await sleep(600);
     const li = document.querySelector('#reclist li');
+    if (!li) { $('rec-close').click(); return '（库里没棋谱，跳过）'; }
     const bs = [...li.querySelectorAll('button')];
     const rv = bs.find(b => b.textContent.indexOf('复盘报告') >= 0);
     if (!rv || rv.disabled) { $('rec-close').click(); return '（没有已存报告，跳过）'; }

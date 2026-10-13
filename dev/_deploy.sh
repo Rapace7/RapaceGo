@@ -59,12 +59,22 @@ export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 #   于是「打包那步失败、而 commit 照样成功」的坑会再来一次 ——
 #   所以这里显式把三样都定位好，不依赖外部 PATH。
 # ============================================================
-PORTABLE_GIT="C:/Users/rapac/.workbuddy/binaries/PortableGit/versions/1.2.0"
-if [ -x "$PORTABLE_GIT/cmd/git.exe" ]; then
+# ★ 2026-10-14：`.workbuddy` 下 PortableGit 的版本号会变（原来写死 1.2.0，实际已经是 1.3.0）——
+#   写死版本号的后果是「某天脚本突然找不到 git，而 commit 那步照样报成功」。
+#   改成**自动探测**该目录下任意可用版本；再不行退到 Qoder 自带的那套（本机实测 git 2.52）。
+PORTABLE_GIT=""
+for d in /c/Users/rapac/.workbuddy/binaries/PortableGit/versions/*/; do
+  if [ -x "${d}cmd/git.exe" ]; then PORTABLE_GIT="${d%/}"; break; fi
+done
+if [ -z "$PORTABLE_GIT" ] && [ -x "/c/Users/rapac/.qoder-cn/bin/git/cmd/git.exe" ]; then
+  PORTABLE_GIT="/c/Users/rapac/.qoder-cn/bin/git"
+fi
+if [ -n "$PORTABLE_GIT" ] && [ -x "$PORTABLE_GIT/cmd/git.exe" ]; then
   export PATH="$PORTABLE_GIT/cmd:$PATH"
-  echo "  已把 PortableGit 加进 PATH（$(git --version 2>/dev/null || echo 取不到版本)）"
+  echo "  已把 git 加进 PATH（$(git --version 2>/dev/null || echo 取不到版本)）"
 else
-  echo "  ★ 找不到 PortableGit 的 git.exe —— 后面的提交/推送会失败：$PORTABLE_GIT"
+  echo "  ★ 找不到可用的 git.exe —— 后面的提交/推送会失败"
+  echo "    找过：/c/Users/rapac/.workbuddy/binaries/PortableGit/versions/*/ 与 /c/Users/rapac/.qoder-cn/bin/git/"
 fi
 # npm 不存在时直接调 electron-builder 的 CLI（等价于 `npm run dist` = `electron-builder --win`）
 EB_CLI="node_modules/electron-builder/out/cli/cli.js"

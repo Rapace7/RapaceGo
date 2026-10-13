@@ -41,7 +41,9 @@ const load = await js(`(async function(){
   return { 就绪: engineReady, 等了秒: Math.round((Date.now()-t0)/1000) };
 })()`, 200000);
 console.log('引擎 ' + JSON.stringify(load));
-if (!load || !load.就绪) { ws.close(); process.exit(1); }
+/* ⚠️ 上面那段表达式有**两条返回路径、两个字段名**：引擎已在时返回 {已就绪:true}，
+   等过之后返回 {就绪:true}。检查必须两个都认，否则"引擎本来就开着"反而被判失败退出。 */
+if (!load || !(load.就绪 || load.已就绪)) { ws.close(); process.exit(1); }
 
 const run = await js(`(async function(){
   const sleep = ms => new Promise(r => setTimeout(r, ms));

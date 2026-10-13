@@ -57,3 +57,19 @@ _*.tmp
 #   教训：别一个个加名字，**用通配符一次覆盖所有变体**（下面这行）。
 _*msg*.txt
 _*.tmp
+
+# ★★ 2026-10-14：`dev/` 目录下的**本机调试产物**。
+#   原来上面那条 `/_.*.png` 只挡根目录的截图 —— `dev/` 下的一律漏网，
+#   于是 `git add -A` 会把调试 profile（8 MB 的 Electron 缓存）、
+#   临时截图、跑测日志一起提交进去。这里逐类挡掉：
+#     · _dbg_profile / _unpacked_profile —— Electron 的 --user-data-dir（缓存 + GPU 着色器）
+#     · _cdp_start.log / _regress_*.txt —— 跑一次写一次的日志
+#     · _*.png —— 探针截的图（产品用的截图在 docs/screenshots/，不受影响）
+#   ⚠️ 刻意**不**忽略 `.mjs` / `.js`：那批探针脚本是要进仓库的（别人接手能直接跑）。
+dev/_dbg_profile/
+dev/_unpacked_profile/
+dev/_cdp_start.log
+dev/_regress_out.txt
+dev/_regress_err.txt
+dev/_fix_layout_fn.txt
+dev/_*.png

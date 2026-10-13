@@ -44,6 +44,24 @@ body {
 .brand { font-size: 14px; font-weight: 600; letter-spacing: .3px; }
 .status { font-size: 12px; color: var(--text-dim); padding-left: 8px; border-left: 1px solid var(--line); }
 
+/* ---------- 试下（草稿）状态徽标（2026-10-13 新增，用户要求「进入试下状态要显示」） ----------
+   顶栏状态行是纯文本，混不进彩色标记，所以单独一枚胶囊，进入试下才出现。
+   ⚠️ 下面这条 [hidden] 是**必须显式写**的 —— 本项目的老坑（第 6 次）：
+      一旦给元素设了 display:xxx，浏览器默认的 [hidden] { display: none } 优先级更低、
+      会被顶掉（前五次是 .verdict / .board-gate / .mrow / .clock-card / .disp-menu）。 */
+.draft-badge {
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(42, 99, 84, .12);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+.draft-badge[hidden] { display: none; }
+
 .field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 
 /* ★ 顶栏同底栏：按钮 / 下拉 / 标签都**不许被压窄**（否则文字挤成竖排）。
@@ -214,18 +232,28 @@ main { flex: 1; display: flex; min-height: 0; }
 
 /* ---------- 侧栏 ---------- */
 /* ★ 左栏（2026-10-05 新增，用户要求）：手数列表 + 两个讲解框。
-   宽度和右栏接近，棋盘两侧对称一点；内边距方向反过来（padding 在左，右为 0）。 */
+   宽度和右栏接近，棋盘两侧对称一点；内边距方向反过来（padding 在左，右为 0）。
+   ★ 284 → 400px（首相 2026-10-13 定：树面板要加宽）。284px 时串珠可视区只有 242px，
+   一屏 3 列，失去「一眼看全分支」的意义；400px 能看 ~11 列（列距 34px），
+   棋盘那边仍守得住 minWidth:1020 的下限（1920 宽窗口余量充足）。 */
 .left {
-  width: 284px;
+  width: 400px;
   flex: none;
   display: grid;
-  grid-template-rows: minmax(0, 3fr) minmax(0, 3fr) minmax(0, 4fr);
+  grid-template-rows: minmax(0, 2.5fr) minmax(0, 5fr) minmax(0, 2.5fr);
   gap: 8px;
   padding: 12px 0 12px 14px;
   min-height: 0;
 }
-/* 手数、分析讲解、推荐落点讲解按实际卡片高度分配 3:3:4。 */
-.left > .card { min-height: 0; }
+/* ★ 2026-10-12（首相要求）：手数栏（上）和推荐落点讲解（下）**压缩高度**，
+   把地方让给中间的分析讲解 —— 复盘时中间那栏是主角，另两个是配角。
+   原来是 3:3:4（中间只占 30%），现在 2.5:5:2.5（中间占 50%）。
+   两个配角仍然各自可滚动，内容多不会挤坏布局。 */
+/* ★ min-width:0 是必需的（2026-10-13 段③ 踩到）：flex 子项默认 min-width:auto，
+   树面板那种「内容比栏宽」的块会把整张卡撑破 —— 实测 .branch-tree 的 clientWidth
+   变成 4698px（= 内容宽），于是 scrollWidth == clientWidth，**滚动条永远出不来**，
+   而且溢出的胶囊会盖到棋盘和右栏计时卡后面。加 min-width:0 让卡片老实待在 284px 里。 */
+.left > .card { min-height: 0; min-width: 0; }
 
 /* 讲解卡的头：标题（占满剩余宽度）+ 右侧按钮 */
 .coach-head {
@@ -360,10 +388,95 @@ main { flex: 1; display: flex; min-height: 0; }
 .movelist .dl.calc { color: var(--text-dim); opacity: .45; }
 /* 试下（草稿）里下的手：整体压淡 + 标个「草」，免得回头忘了自己在草稿里 */
 .movelist li.draft .no, .movelist li.draft .st, .movelist li.draft .pt { opacity: .5; }
+
+/* ---------- 段③ 水平分叉树面板（2026-10-13，首相定的 KaTrain 式「珍珠手串」） ----------
+   与手数列表并存，标题旁滑杆切换。列=手数、行=航道，主线恒在第一行。
+   ⚠️ .branch-tree 是 display:flex —— 必须显式写 [hidden] 那条，否则藏不住
+      （本项目老坑，.disp-menu / .verdict / .clock-card / .mrow / .board-gate 都栽过）。 */
+.branch-tree {
+  flex: 1; min-height: 0; overflow: auto;
+  display: flex; background: var(--line-soft); border-radius: 6px;
+  position: relative;
+}
+.branch-tree[hidden] { display: none; }
+.branch-tree.panning { cursor: grabbing; user-select: none; }
+.bt-inner { position: relative; flex: none; }
+
+/* 连线：同航道的水平段 + 侧支的竖直段与落底水平段。
+   画在珠子之前，珠子压在它上面 —— 线从珠心穿到珠心，看上去是手串的绳。
+   ★ height 必须有默认值（2026-10-13 实拍发现）：水平段只写了 left/top/width，
+   没写 height 的 div 高度为 0 = **整条线隐形**（竖线自己带 inline height 不受影响）。 */
+.ln { position: absolute; background: #b8b2a4; height: 2px; border-radius: 1px; }
+.ln.ln-main { background: #cfa63e; }              /* 主变那段带金色调，呼应金圈 */
+.ln.ln-br { background: #b8b2a4; }
+
+/* 节点 = 圆形棋子。手数印在珠心，用**相反色**（黑子白字 / 白子黑字）。 */
+.cap {
+  position: absolute; width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 10px; font-weight: 600;
+  box-shadow: 0 1px 2px rgba(60,45,15,.28);
+}
+.cap.sb { background: radial-gradient(circle at 32% 30%, #5a5a58, #1b1b1a); color: #f3f2ee; }
+.cap.sw { background: radial-gradient(circle at 32% 30%, #ffffff, #dedcd4); color: #24241f; border: 1px solid #b9b4a6; }
+/* ★ 主变（实战线）那串珠子带**金色外圈**（首相 2026-10-13 定的）：一眼看出哪条是主线 */
+.cap.main { box-shadow: 0 0 0 2px #d9a62b, 0 1px 3px rgba(60,45,15,.3); }
+.cap:hover { filter: brightness(1.08); }
+/* ★ 当前在看的那一手 = **青色环 + 轻微放大**，并且与金圈**互斥**
+   （原来写成 outline 套在外面，当前手落在主变上时金圈+青圈叠成双环，糊得分不清）。
+   语义就两条：金环「这条是主线」、青环「我在这里」——同一颗珠子只该有一种强调。
+   ⚠️ 必须排在 .cap.main 之后（同优先级，靠顺序覆盖 box-shadow）。 */
+.cap.cur {
+  box-shadow: 0 0 0 2.5px var(--accent), 0 1px 3px rgba(60,45,15,.3);
+  transform: scale(1.18);
+  z-index: 2;
+}
+.cap b { font-size: 10px; line-height: 1; font-weight: 600; }
+/* 折叠角标：挂在珠子右上角，折起来时显示「+n」（藏着几条侧支）。
+   ★ 2026-10-13 DSH 调整（段③ 尾巴之三「与金圈同珠时视觉挤」）：
+     原来贴在 -7px 处，而主变珠的金圈是 `box-shadow: 0 0 0 2px`（占珠子外 2px）——
+     两者只隔 5px，角标会**压在金圈上**、看着糊成一团。
+     现在往外挪到 -9px 并补一圈**同色描边**（用 box-shadow 画，不引新变量），
+     让角标与珠子/金圈之间留出一条干净的缝。 */
+.cap .tf {
+  position: absolute; right: -9px; top: -9px;
+  font-style: normal; font-size: 9px; line-height: 13px; min-width: 13px;
+  padding: 0 2px; text-align: center; border-radius: 7px; cursor: pointer;
+  background: var(--accent); color: #fff;
+  box-shadow: 0 0 0 1.5px var(--panel), 0 1px 2px rgba(60, 45, 15, .3);
+}
+.tree-menu {
+  position: fixed; z-index: 40; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .18); padding: 4px; min-width: 168px;
+}
+.tree-menu button {
+  text-align: left; border: none; background: none; cursor: pointer;
+  padding: 5px 8px; border-radius: 5px; font-size: 12px; color: var(--text);
+}
+.tree-menu button:hover { background: var(--accent-soft); }
+/* 悬停浮层：坐标 / 手数 / 胜率增减 / 复盘目损 / 是否已讲解 —— 珠子只放手数，细节全在这儿 */
+.bt-tip {
+  position: fixed; z-index: 45; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 9px; border-radius: 7px; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .16);
+  font-size: 11.5px; line-height: 1.5; color: var(--text); max-width: 240px;
+}
+.bt-tip[hidden] { display: none; }
+.bt-tip .good { color: var(--accent); }
+.bt-tip .bad { color: var(--danger); }
+.bt-tip .dim { color: var(--text-dim); font-size: 10.5px; }
 .movelist .dft {
   flex: none; font-size: 10px; line-height: 15px; padding: 0 4px; border-radius: 3px;
   background: rgba(47, 111, 94, .14); color: var(--accent);
 }
+/* 手数分支：这一手有别的走法（旁支）→ 行上标「⑂1/2」，↑/↓ 切换（2026-10-13） */
+.movelist .br {
+  flex: none; font-size: 10px; line-height: 15px; padding: 0 4px; border-radius: 3px;
+  background: rgba(196, 122, 30, .16); color: #a8641a;
+}
+.movelist li.cur .br { background: rgba(196, 122, 30, .32); }
 
 /* 试下按钮：常态不填色，处于试下状态才填色 */
 #btn-draft.on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -610,10 +723,12 @@ main { flex: 1; display: flex; min-height: 0; }
 .modal h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
 
 /* ---------- 棋谱库弹窗 ---------- */
-.rec-modal { width: 580px; max-height: 78vh; display: flex; flex-direction: column; }
+/* ★ 2026-10-12 用户要求：棋谱库做大 —— 棋谱名和备注名要能看全。
+   原来 580px 宽 + 名字 nowrap/ellipsis，长名字被截成「符…」，看不出是哪盘棋。 */
+.rec-modal { width: min(880px, 94vw); max-height: 84vh; display: flex; flex-direction: column; }
 .rec-modal h2 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
 .rec-dir { font-size: 11px; font-weight: 400; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reclist { list-style: none; flex: 1; overflow-y: auto; margin: 0 0 12px; min-height: 96px; max-height: 54vh; }
+.reclist { list-style: none; flex: 1; overflow-y: auto; margin: 0 0 12px; min-height: 96px; max-height: 64vh; }
 
 /* 棋谱库顶部工具条：搜索框 + 「共 N 份 / 筛出 M 份」计数 */
 .rec-tools { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
@@ -624,13 +739,15 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .rec-tools input:focus { outline: none; border-color: var(--accent); }
 .rec-count { flex: none; font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
-.reclist li { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; font-size: 12.5px; }
+.reclist li { display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px; border-radius: 7px; font-size: 12.5px; }
 .reclist li:hover { background: rgba(0, 0, 0, .045); }
-/* 棋谱条目：上行备注名 + 下行真实文件名（用户要求两个都显示） */
+/* 棋谱条目：上行备注名 + 下行真实文件名（用户要求两个都显示）
+   ★ 2026-10-12：两个名字都**允许换行显示全名** —— 原来 nowrap + ellipsis
+     会把长名字截成「符…」，用户看不出是哪盘棋。 */
 .reclist .rec-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.reclist .rec-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reclist .rec-file { font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reclist .rec-meta { flex: none; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.reclist .rec-name { white-space: normal; word-break: break-word; line-height: 1.4; }
+.reclist .rec-file { font-size: 10.5px; color: var(--text-dim); white-space: normal; word-break: break-word; line-height: 1.4; }
+.reclist .rec-meta { flex: none; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding-top: 2px; }
 .reclist li button { height: 24px; padding: 0 9px; font-size: 11.5px; flex: none; }
 .reclist .empty { display: block; text-align: center; padding: 26px 0; color: var(--text-dim); cursor: default; }
 /* 备注（改名）：就地展开的输入框 */

@@ -50,16 +50,29 @@ recommended moves stop appearing, or the "computing… N" line above the board f
 press it: it releases the stuck analysis, re-queues it, re-checks the engine, and
 restarts the engine if it is actually dead.
 
-**Explanation** — three panels, all powered by the local LoGos model:
-- **Explain this move** — verdict from KataGo, reasoning from LoGos. Stored per move.
+**Explanation** — three panels. The verdict is always **KataGo's**, never the model's:
+- **Explain this move** — three parts, in order: **① verdict** (praise a good move, call out a
+  bad one — decided by KataGo's win-rate swing, so the model can't flatter a blunder);
+  **② reasoning** (what this move touched, how the opponent will likely answer, why it's
+  good or bad — that part is LoGos); **③ comparison** (what KataGo preferred instead, that
+  move's win rate, and how many points this one lost — numbers come from KataGo, not invented).
+  Stored per move.
 - **Explain candidates** — several recommended points, each explained.
-- **Explain whole game** — narrates every move of an SGF once; **the result is saved
-  next to the SGF**, so reopening it shows the commentary instantly.
+- **Explain whole game** — narrates every move of an SGF once (same format as above);
+  **the result is saved next to the SGF**, so reopening it shows the commentary instantly.
 
 ![Whole-game commentary](docs/screenshots/batch-progress.png)
 
-**Game library** — import / export / rename / delete / search SGFs, with badges for
-"reviewed" and "has commentary".
+**Game library** — open / AI review / review report / note / **overwrite** / rename / delete /
+search SGFs, with badges for "reviewed" and "has commentary". Long note names and file names
+are shown **in full** (they wrap instead of being cut off).
+The **Overwrite** button replaces that SGF with **the game currently on the board** — handy
+after you fix up a record, so you don't end up with a new file plus an old one to delete by
+hand. It leaves a `.bak` backup of the previous content first, so it is recoverable.
+
+**Player names** — click a name on the right to edit it. It is written into the SGF's
+`PB` / `PW` tags **immediately**, including while replaying a record (no need to re-save);
+other software reads them too.
 
 **Commentary stored inside the SGF** (many downloaded records carry it, especially pro games
 and problem collections): the **Commentary** box (bottom right) shows the note for the move
