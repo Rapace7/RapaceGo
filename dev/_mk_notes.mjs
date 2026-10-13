@@ -48,17 +48,40 @@ const firstLine = (ver.split('\n')[0] || '').replace(/^v?[\d.]+\s*[：:]\s*/, ''
 
 /* ★ 2026-10-09 改：从 v0.1.26 起有**三个**下载包（win + mac 两个架构），
    原来那句"下载 Assets 里那个 RapaceGo.zip"就过时了 —— 用户会找不到那个名字。
-   这里按平台列清楚，并顺手说明"都不含引擎"（这是最常被误解的一点）。 */
+   这里按平台列清楚，并顺手说明"都不含引擎"（这是最常被误解的一点）。
+
+   ★★ 2026-10-14 再改：**改成按 dist 里"本次真的打出来的包"列**，不再写死三个平台。
+      踩过的坑（v0.1.27）：本机是 Windows，只打了 win 包；而这张表写死三行，
+      于是 Release 页面上列着两个 mac 包 —— 用户点进去**根本没有那个文件**。
+      判据：与 dist 里**最新那个 zip** 修改时间相差 10 分钟以内的，算同一批构建产物
+      （同一次 electron-builder 出来的文件时间几乎一样；旧的 mac 包是几天前的，一下就能分开）。 */
+const PLAT = {
+  'RapaceGo-win.zip': 'Windows',
+  'RapaceGo-mac-arm64.zip': 'macOS（M 系列，Apple 芯片）',
+  'RapaceGo-mac-x64.zip': 'macOS（Intel）',
+};
+let zips = [];
+try {
+  const distDir = path.join(ROOT, 'dist');
+  const all = fs.readdirSync(distDir)
+    .filter(f => /^RapaceGo-.*\.zip$/i.test(f))
+    .map(f => ({ f, m: fs.statSync(path.join(distDir, f)).mtimeMs }))
+    .sort((a, b) => b.m - a.m);
+  if (all.length) {
+    const newest = all[0].m;
+    zips = all.filter(x => newest - x.m < 10 * 60 * 1000).map(x => x.f).sort();
+  }
+} catch (e) { /* dist 不存在（比如没打包就生成说明）→ 空表，下面会兜底 */ }
+if (!zips.length) zips = ['RapaceGo-win.zip'];   // 兜底：至少别给出一张空表
+
 const HEAD = [
   '**' + (firstLine || '本次更新说明见下。') + '**',
   '',
-  '**下载**（页面最下面的 `Assets`，按平台挑一个；三个都**不含引擎**）：',
+  '**下载**（页面最下面的 `Assets`，按平台挑一个；这些包都**不含引擎**）：',
   '',
   '| 平台 | 文件 |',
   '|---|---|',
-  '| Windows | `RapaceGo-win.zip` |',
-  '| macOS（M 系列） | `RapaceGo-mac-arm64.zip` |',
-  '| macOS（Intel） | `RapaceGo-mac-x64.zip` |',
+  ...zips.map(f => '| ' + (PLAT[f] || '—') + ' | `' + f + '` |'),
   '',
   '引擎要自己配（见 README「显卡品牌」那一节）；想省事就用**懒人包**（网盘那个完整包，自带引擎）。',
   '',
