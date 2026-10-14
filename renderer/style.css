@@ -403,10 +403,39 @@ main { flex: 1; display: flex; min-height: 0; }
   flex: 1; min-height: 0; overflow: auto;
   display: flex; background: var(--line-soft); border-radius: 6px;
   position: relative;
+  /* ★ 2026-10-14：纵向居中。树只有一两行时（比如只看主变最近这一小段），
+     原来会贴着顶、下面一大片空白；居中之后画面重心回到中间，放大窗里尤其明显。 */
+  align-items: center;
 }
 .branch-tree[hidden] { display: none; }
 .branch-tree.panning { cursor: grabbing; user-select: none; }
 .bt-inner { position: relative; flex: none; }
+
+/* ---------- 分支树放大窗口（2026-10-14 首相要求「展开一个大窗口方便找分支」） ----------
+   窄栏只有 370 多 px，打谱谱变着多时要一点一点横向挪着找。
+   ★ 实现是**把 #branch-tree 这个元素搬进来**（见 app.js 的 setTreeZoom）——
+     所以这里只管"给它多大地方"，渲染逻辑一个字都不用改。 */
+/* ⚠️ 必须写成 `.modal.treezoom-box`（两个类）—— 只写 `.treezoom-box` 的话，
+   它和 `.modal { width: 470px }` 同优先级，而 `.modal` 那条在本文件**更靠后** → 宽度被 470 压住，
+   大窗只剩 426px（470 减掉 padding），"放大"等于没放大。实测踩到（断言 Z5）。 */
+.modal.treezoom-box {
+  width: min(1560px, 96vw);
+  height: min(880px, 90vh);
+  display: flex; flex-direction: column;
+}
+.treezoom-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.treezoom-head .card-title { font-size: 14px; font-weight: 600; }
+.treezoom-hint { flex: 1; font-size: 11px; color: var(--text-dim); }
+.treezoom-slot { flex: 1; min-height: 0; display: flex; }
+/* 搬进来之后让树面板撑满这个 slot（它自己的 flex:1 / min-height:0 依然生效） */
+.treezoom-slot .branch-tree { flex: 1; }
+/* 标题栏里那个「⤢ 放大」小按钮（与 seg 同排，比 seg 矮一点才不抢眼） */
+.mini-btn {
+  height: 22px; padding: 0 8px; font-size: 11px; line-height: 20px;
+  border-radius: 6px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text);
+}
+.mini-btn:hover { background: var(--accent-soft); }
 
 /* 连线：同航道的水平段 + 侧支的竖直段与落底水平段。
    画在珠子之前，珠子压在它上面 —— 线从珠心穿到珠心，看上去是手串的绳。

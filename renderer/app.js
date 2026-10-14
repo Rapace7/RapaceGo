@@ -1180,52 +1180,127 @@ function nodeDeltaTxt(node, depth) {
 function treeLayout() {
   ensureBranch();
   treeCells = []; treeLanes = 1; treeMaxDepth = 0;
+  treePosOf = new Map();
 
-  /* ★★ 2026-10-14 重写（首相实测：打开柯洁VS芈昱廷那盘打谱谱，「都交叉在一起，看都看不明白」）。
+  /* ★★ 2026-10-14 第二次重写（首相看过放大窗之后又指出两条）：
+   *   「最后几手展开那么靠上，越靠前的分支越在最下面，这不合理吧」
+   *   「每个分支都单起一行太浪费 —— 明明有些是两头碰不到的」
    *
-   * 【旧做法为什么必然交叉】
-   *   主变**恒占第 0 行**、往右一条线走到底；每条侧支调 `pickRow` 去"复用"某个已有行，
-   *   而且要求下落线「途经的每一行都不许有珠子」。问题是：**复用行就等于让下落线跨过中间那些行**，
-   *   一旦分支密集（打谱谱的变着动辄几十条），避让**无解** → 只能硬塞 → 交叉成一团。
-   *   这不是参数没调好，是范式选错了。
+   * 【第一条为什么反了】上一版用**深度优先**分配行号：主变先整条走完（一步不占新行），
+   *   然后回溯时**最先回溯到的（也就是最深的）分叉先拿到小行号** →
+   *   于是"175 的分支在最下、182 的分支在最上"，正好跟直觉相反。
+   *   现在改成**按分叉手数（depth0）从浅到深分配** —— 靠前的分叉先拿靠上的行。
    *
-   * 【新做法 —— 业界通行范式（Sabaki / Lizzie 都是这个路子）】
-   *   · **深度 = 横轴**，**分叉 = 纵轴**，每个节点只占一格；
-   *   · **主变（`_cs[0]`）继承父节点的行**，沿同一条水平航道继续往右；
-   *   · **每条侧支新开一行**，行号**全局递增、绝不与他人共用**。
-   *   于是任何一条下落线的"两侧"永远是空行 → **数学上不可能交叉**。
-   *   代价是行数比旧做法多（每条侧支独占一行），但那正是"看得明白"要付的代价。
+   * 【第二条怎么省】行可以**复用**，但必须同时满足两条（否则又会交叉）：
+   *   ① 这一行上，从**父珠所在列**到本支末端的整段都是空的
+   *      （水平连接段是从父列开始画的，所以要从父列算起，不能只算本支的列）；
+   *   ② **父珠所在列**上，从父的行到本行的每一格都没有珠子（下落线不被挡）。
+   *   两条都过才共用 —— 这样"不交叉"仍然成立，但行数能显著降下来。
    *
-   * 【为什么用深度优先 + 全局递增】
-   *   主变先整条走完（一步不占新行），然后第一条侧支拿下一行、并把它**整棵子树**连续铺在
-   *   紧随其后的行上 —— 于是"同一条支"在纵向上是**连成一片**的，一眼能圈出来。
-   *
-   * ⚠️ 折叠（`treeCollapsed`）只影响**画不画**侧支，不影响主变的行号。 */
-  let nextRow = 0;
-  const place = (node, depth, row) => {
-    if (!node._virtual) {
-      treeCells.push({ node, depth, row });
-      if (row + 1 > treeLanes) treeLanes = row + 1;
-      if (depth > treeMaxDepth) treeMaxDepth = depth;
-    }
+   * ⚠️ 分配顺序保证"父必先于子"：`depth0` 浅的一定排在前面，所以轮到某条支时，
+   *    它父节点的行号**已经定好了**（`rowOf(parent)`）。
+   * ⚠️ 折叠只影响"画不画"，不影响别的支的分配。 */
+
+  const occ = [];                                   // occ[r] = 该行已占用的列集合
+  const occOf = r => (occ[r] || (occ[r] = new Set()));
+  const colFree = (r, d) => !occOf(r).has(d);
+  const rangeFree = (r, d0, d1) => {
+    for (let d = d0; d <= d1; d++) if (!colFree(r, d)) return false;
+    return true;
+  };
+  const put = (node, depth, row) => {
+    treeCells.push({ node, depth, row });
+    treePosOf.set(node, { d: depth, r: row });
+    occOf(row).add(depth);
+    if (row + 1 > treeLanes) treeLanes = row + 1;
+    if (depth > treeMaxDepth) treeMaxDepth = depth;
+  };
+
+  /* 子树「会画出来的列跨度」（折叠掉的侧支不算）—— 判复用时要按这个算占用区间 */
+  const spanOf = n => {
+    if (treeCollapsed.has(n)) return 1;
+    let best = 1;
+    for (const c of (n._cs || [])) { const s = 1 + spanOf(c); if (s > best) best = s; }
+    return best;
+  };
+
+  /* ---------- ① 主变：占第 0 行，沿 _cs[0] 一路往右 ---------- */
+  let cur = branchRoot, d = 0;
+  while (cur && cur._cs && cur._cs.length) {
+    cur = cur._cs[0];
+    d += 1;
+    put(cur, d, 0);
+  }
+  /* ⚠️ 虚拟根（branchRoot）**不入格、不占列** —— 它只是"所有支的共同起点"。
+     曾被写成"put 之后再 pop/delete"，那样列 0 会被它白占一格，第 1 手的连线也少一段。 */
+
+  /* ---------- ② 收集所有"侧支"，按分叉手数从浅到深排序 ---------- */
+  let nextRow = 0;                                  // 主变占了行 0，侧支从 1 开始
+  const branches = [];
+  (function collect(node, depth) {
     const cs = node._cs || [];
     if (!cs.length) return;
-    /* ★ 顺序不能换：**主变永远要画**，折叠折的是「侧支」那几条（_cs[1..]）。
-       我第一版把折叠判断放在了 place(cs[0]) **之前** —— 于是折叠时连主线都不画了，
-       表现为"按 C 折叠后整棵树只剩三颗珠子"（_inject_tree_v1 的 ⑥1 抓到的）。 */
-    place(cs[0], depth + 1, row);                 // ★ 主变：继承本行，继续往右
-    if (treeCollapsed.has(node)) return;          // 折起了：侧支整批不画（珠子上给 +n）
-    for (let i = 1; i < cs.length; i++) {         // ★ 其余每条：各占一个新行
-      nextRow += 1;
-      place(cs[i], depth + 1, nextRow);
+    if (treeCollapsed.has(node)) { collect(cs[0], depth + 1); return; }   // 折起：侧支不画，主变照走
+    for (let i = 1; i < cs.length; i++) {
+      branches.push({ head: cs[i], parent: node, depth0: depth + 1, span: spanOf(cs[i]) });
+      collect(cs[i], depth + 1);
     }
-  };
-  place(branchRoot, 0, 0);
+    collect(cs[0], depth + 1);
+  })(branchRoot, 0);
+  /* ★ 稳定排序按分叉手数 —— 这就是"越靠前的分支越靠上" */
+  branches.sort((a, b) => a.depth0 - b.depth0);
 
-  treePosOf = new Map();
-  for (const c of treeCells) treePosOf.set(c.node, { d: c.depth, r: c.row });
-  /* ★ 左右各留一点边：左上角那颗珠子原来「零距离贴边」，连它上面的折叠角标都被切掉
-     （首相 2026-10-14 报的）。左边留 TREE_PAD_X，右边也留等量，滚到头不会顶着边。 */
+  /* ---------- ③ 依次分配行 ----------
+   * ★★ 2026-10-14 定稿：**每条侧支各占一个新行**（行号全局递增），**不做"复用行"**。
+   *
+   * 【为什么放弃复用】试过 —— 复用要同时满足两条约束（① 水平段从父列到本支末端整段要空；
+   *   ② 父列上从父行到本行每一格要空）。这套判据**很难写对**，而一旦有偏差，
+   *   就退化成"永远找不到满足条件的行" → 循环一路撞到兜底上界（实测分到了**第 67 行**），
+   *   比"多占几行"糟得多。更早那版还因为约束②把父珠自己算作挡路，直接**死循环**把渲染进程卡死。
+   *   **宁可多占行，也不要一个能把自己卡死的判据。**
+   *
+   * 【顺序这一条是首相真正在意的，已修正】上一版用**深度优先**分配：
+   *   最先回溯到的（也就是最深的）分叉先拿到小行号 → 「175 的分支在最下、182 的在上」，正好反过来。
+   *   现在 `branches` 已按 `depth0`（分叉手数）**从浅到深**排好，所以**靠前的分叉拿靠上的行** ——
+   *   这就是首相要的顺序。
+   *
+   * 【"不交叉"仍然成立】每条支独占一行 → 任何一条下落线的两侧永远是空行 ——
+   *   `_inject_tree1014.js` 的 T1 就是照这个判的（"下落线段上没有别的珠子"）。
+   *
+   * ⚠️ 若将来真要省行，请**先给"复用判据"写出单测**（构造几棵重叠/不重叠的树断言行号），
+   *    再放进 `treeLayout` —— 别再凭推理直接改这段。 */
+  for (const br of branches) {
+    const pp = treePosOf.get(br.parent);
+    if (!pp) continue;                              // 父没被画出来（理论上不会）
+    nextRow += 1;
+    const r = nextRow;
+    /* ★★ 2026-10-14 定稿：**不做任何"找行/避让"**，每条支直接拿下一个行号。
+     *
+     * 【为什么把避让也删了】这一轮试了两次"聪明的找行"，两次都不靠谱：
+     *   · 第一次（复用行 + 无上界循环）：约束把父珠自己当成挡路 → **死循环** →
+     *     渲染进程整个卡死、页面全白（首相报的"啥都没渲染"就是它）；
+     *   · 第二次（独占行 + 下落线避让 + 上界兜底）：判据仍然恒不满足 →
+     *     一路撞到兜底 → 第二条支分到了**第 514 行**（树高成那样，比不避让糟得多）。
+     *   两次的教训是同一条：**这类"找第一个满足条件的行"的判据，写错的代价远大于收益**。
+     *   所以定稿成最简单的形态 —— **序号即行号**。它显然收敛、显然不重叠、显然能预测。
+     *
+     * 【代价，说清楚】下落线是垂直画的，偶尔会从**别的行某个珠子上**穿过（视觉小瑕疵）。
+     *   要根治应该把连线改成**斜线**（圆心到圆心，就不会压在格子上），
+     *   那是 `treePaint` 的事，跟布局无关 —— 留作后续改进，别再动这个函数。
+     *
+     * 【首相在意的顺序，已修正】`branches` 按 `depth0` 从浅到深排过 → 靠前的分叉拿靠上的行。 */
+    /* 把这条支的**主链**摆上去（它自己的子支由外层 branches 循环处理） */
+    let n = br.head, dd = br.depth0;
+    put(n, dd, r);
+    while (n && n._cs && n._cs.length) {
+      n = n._cs[0];
+      dd += 1;
+      put(n, dd, r);
+    }
+  }
+
+  /* ★ 左右各留一点边（首相 2026-10-14：左上那颗珠子原来零距离贴边，
+     连它上面的折叠角标都被切掉）。 */
   treeTotalW = TREE_PAD_X * 2 + 6 + Math.max(1, treeMaxDepth) * TREE_W;
 }
 
@@ -1298,30 +1373,96 @@ function treePaint() {
   inner.innerHTML = html;
 }
 
-/* 渲染入口：syncUI 每次刷手数列表时顺带刷树（树没打开就直接跳过，零开销） */
+/* 渲染入口：syncUI 每次刷手数列表时顺带刷树（树没打开就直接跳过，零开销）。
+ *
+ * ★★ 2026-10-14 首相报的「展开收起分支的时候视野会自动跳到最后去」—— 两个成因都在这里：
+ *   ① **折叠后树变矮/变窄** → 浏览器把 `scrollTop` / `scrollLeft` **自动夹到新的最大值**
+ *      → 视野"啪"地贴到底/贴到右（首相看到的"跳到最后"就是这个）；
+ *   ② 下面那段还会主动"把当前手滚进视野" —— 用户明明在看别处（刚翻到某个分支），
+ *      一折叠就被**拉回当前手**，感觉像被抢了方向盘。
+ *   修法：**"要不要自动滚动"只在"当前手真的换了（或面板尺寸变了）"时才做**；
+ *   其余重绘（折叠/展开、行数变化）一律**保住原来的滚动位置**，只把它夹回合法范围。
+ *   ⚠️ 为什么 sig 里要带 `clientWidth`：开关放大窗时容器尺寸大变，
+ *      那种情况**恰恰应该**重新把当前手居中（宽度不同，"看得见哪一段"完全不同）。 */
+let treeScrollSig = '';
 function renderMoveTree() {
   const box = $('branch-tree');
   if (!box) return;
   if (movesView !== 'tree') return;
+  const keepL = box.scrollLeft, keepT = box.scrollTop;    // ★ 先记下视野
   treeLayout();
-  box.firstElementChild.style.width = treeTotalW + 'px';
+  const inner = box.firstElementChild;
+  inner.style.width = treeTotalW + 'px';
   /* ★ 2026-10-14：上下都留白（原来只留了底部 8px，顶部 0 —— 第一行的折叠角标被切掉）。 */
-  box.firstElementChild.style.height = (TREE_PAD_Y * 2 + treeLanes * TREE_H) + 'px';
+  inner.style.height = (TREE_PAD_Y * 2 + treeLanes * TREE_H) + 'px';
   treePaint();
-  /* 把当前手滚进视野（只在位置变化时滚，理由同 renderMoveList 的滚动） */
+  /* 当前手在不在树上（折叠可能正好把它折掉 → cell 为 undefined，那就更不该乱滚） */
   const curNode = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
   const cell = curNode && treeCells.find(c => c.node === curNode);
-  if (cell) {
+  const sig = box.clientWidth + '|' + (state.recName || '') + '|' + state.viewAt + '|' + (cell ? cell.row : -1);
+  const shouldFollow = (sig !== treeScrollSig) && box.clientWidth > 0;
+  treeScrollSig = sig;
+
+  if (cell && shouldFollow) {
+    /* 当前手换了（或面板尺寸变了）→ 主动把它滚进视野 */
     const x = stoneX(cell.depth);
     if (x < box.scrollLeft + STP || x > box.scrollLeft + box.clientWidth - STP - 2) {
       box.scrollLeft = Math.max(0, x - box.clientWidth / 2);
     }
-    /* ★ 纵向也跟着滚 —— 侧支独占一行之后行数多了，当前手很可能在视野外（旧做法行少，没这问题）。 */
     const y = TREE_PAD_Y + 4 + cell.row * TREE_H;
     if (y < box.scrollTop || y + TREE_H > box.scrollTop + box.clientHeight) {
       box.scrollTop = Math.max(0, y - box.clientHeight / 2 + TREE_H / 2);
     }
+  } else {
+    /* 其余情况（折叠/展开、重画）：**只夹回合法范围，绝不主动挪** */
+    const maxL = Math.max(0, treeTotalW - box.clientWidth);
+    const maxT = Math.max(0, (TREE_PAD_Y * 2 + treeLanes * TREE_H) - box.clientHeight);
+    box.scrollLeft = Math.min(keepL, maxL);
+    box.scrollTop = Math.min(keepT, maxT);
   }
+}
+
+/* ---- 分支树放大窗口（2026-10-14 首相要求「展开一个大窗口方便找分支」）----
+ *
+ * 起因：树面板挤在左栏（370 多 px），打谱谱变着多时要一点一点横向挪着找，很难受。
+ *
+ * ★★ 做法：**把 `#branch-tree` 这个元素整个搬进弹窗**，关掉再搬回原位。
+ *   为什么不"在大窗里再渲染一份"：`#branch-tree` 上挂着一大堆交互 ——
+ *     点珠子跳转、右键菜单（提升主变 / 删除分支）、按住右键拖动平移、悬停浮层，
+ *   而且 id 是写死的、`treeCells` / 虚拟化窗口 / 自动滚动全都按它算。
+ *   **搬家之后这些一行都不用改**，也不会出现"小窗和大窗两份状态不同步"这种最难查的 bug。
+ *
+ * ⚠️ 搬回来必须插到**原来的位置**（记住 nextSibling），否则它会跑到卡片末尾去。
+ * ⚠️ 搬完必须重绘：容器尺寸变了，虚拟化只画"看得见的那几列"——
+ *    不重算就还是按旧宽度画，大窗右边一片空白。 */
+let treeZoomOn = false;
+let treeZoomHome = null;                     // { parent, next } —— 原位置，搬回来用
+
+function setTreeZoom(on) {
+  const box = $('branch-tree');
+  const mask = $('treezoom');
+  const slot = $('treezoom-slot');
+  if (!box || !mask || !slot) return;
+  if (on === treeZoomOn) return;             // 幂等：重复点不会把元素搬丢
+  if (on) {
+    if (movesView !== 'tree') { flash('先切到「树」视图，再点放大'); return; }
+    treeZoomHome = { parent: box.parentNode, next: box.nextSibling };
+    slot.appendChild(box);                   // ★ 搬家（同一个元素，事件与状态全都跟着走）
+    mask.classList.add('open');
+    treeZoomOn = true;
+  } else {
+    const home = treeZoomHome;
+    /* 原位插回去。next 可能已经被移走/移除（换过棋谱之类），所以两头都验一下。 */
+    if (home && home.parent && home.parent.isConnected) {
+      const next = (home.next && home.next.isConnected) ? home.next : null;
+      home.parent.insertBefore(box, next);
+    }
+    mask.classList.remove('open');
+    treeZoomOn = false;
+    treeZoomHome = null;
+  }
+  /* 尺寸变了 → 虚拟化窗口要重算，否则只画原来那么几列 */
+  requestAnimationFrame(() => { renderMoveTree(); });
 }
 
 /* 点胶囊 → 跳到那一手。不在当前路径上时，自下而上逐段 switchBranch 把路铺过去
@@ -1452,6 +1593,18 @@ function moveTreeTip(ev2) {
 function initBranchTree() {
   const box = $('branch-tree');
   if (!box) return;
+
+  /* ★ 2026-10-14 放大窗的三个入口（首相要求「展开一个大窗口方便找分支」）：
+       · 标题栏那个「⤢ 放大」按钮（再点一次收起）
+       · 大窗右上角的「收起」
+       · Esc 键（见键盘处理那段）
+     点遮罩空白处也收 —— 与项目里其它弹窗一致的习惯。 */
+  if ($('btn-treezoom')) $('btn-treezoom').onclick = () => setTreeZoom(!treeZoomOn);
+  if ($('btn-treezoom-close')) $('btn-treezoom-close').onclick = () => setTreeZoom(false);
+  if ($('treezoom')) {
+    $('treezoom').addEventListener('click', e => { if (e.target === $('treezoom')) setTreeZoom(false); });
+  }
+
   box.innerHTML = '<div class="bt-inner"></div>';
   box.addEventListener('scroll', () => {
     if (treeRaf) return;
@@ -2394,8 +2547,14 @@ initBranchTree();
 /* 滑杆切视图：列表 ⇄ 树。两个容器互斥显隐（hidden 由 CSS 的 [hidden] 兜住）。 */
 initSeg('seg-moves', v => {
   movesView = (v === 'tree') ? 'tree' : 'list';
+  /* ★ 2026-10-14：切回「列表」时，若放大窗正开着 → **先收起来**。
+     否则树元素还在大窗里、列表却要显示，等于把一个 hidden 的树留在弹窗里，
+     遮罩也撤不掉（用户会看到"列表出来了，但屏幕上压着一层灰"）。 */
+  if (movesView !== 'tree' && treeZoomOn) setTreeZoom(false);
   $('movelist').hidden = movesView === 'tree';
   $('branch-tree').hidden = movesView !== 'tree';
+  /* 「⤢ 放大」只在树视图下有意义 */
+  if ($('btn-treezoom')) $('btn-treezoom').hidden = movesView !== 'tree';
   if (movesView === 'tree') renderMoveTree();   // 刚切过来补画一次（syncUI 那条只在刷时走）
 });
 
@@ -6378,8 +6537,17 @@ window.addEventListener('keydown', e => {
   /* ★ 有弹窗开着（帮助 / 设置 / 复盘 / 棋谱库 / 新对局）→ 全局快捷键一律不响应。
      否则按键会「穿过」弹窗打到背后的棋局上：看着在看帮助，按个空格就把棋停了、
      按 T 推荐点就没了（用户明确说过「弹窗外的背景不该还能点」，键盘同理）。
-     注意判断的是 `.open` —— 遮罩本身是常驻 DOM，不加 .open 时是不可见的。 */
-  if (document.querySelector('.modal-mask.open')) return;
+     注意判断的是 `.open` —— 遮罩本身是常驻 DOM，不加 .open 时是不可见的。
+     ★★ 2026-10-14：**分支树放大窗（#treezoom）是唯一的例外** ——
+        它里面装的正是那棵树，用户在放大窗里当然要能用 ↑/↓ 换分支、C 折叠侧支、PgUp 提主变。
+        所以先放它过去（并接住 Esc 用来收起）。其余弹窗照旧一律挡住。 */
+  const zoomMask = $('treezoom');
+  if (zoomMask && zoomMask.classList.contains('open')) {
+    if (e.code === 'Escape') { e.preventDefault(); setTreeZoom(false); return; }
+    /* 放大窗开着 → 剩下的键继续往下走（不 return） */
+  } else if (document.querySelector('.modal-mask.open')) {
+    return;
+  }
 
   if (e.ctrlKey || e.metaKey) {
     if (e.code === 'KeyZ') { e.preventDefault(); $('btn-undo').click(); }

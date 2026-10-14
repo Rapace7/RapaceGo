@@ -74,6 +74,10 @@
           <button data-v="list" class="on">列表</button>
           <button data-v="tree">树</button>
         </div>
+        <!-- ★ 2026-10-14 首相要求：「分支框做一个展开按钮，能展开一个大窗口方便找分支」。
+             窄栏只有 370 多 px，打谱谱变着多时要靠横向滚动一点一点挪，很难找。
+             这个按钮把树**整个搬进一个全屏窗口**（只在「树」视图下显示）。 -->
+        <button id="btn-treezoom" class="mini-btn" title="把分支树展开成大窗口（Esc 或再点一次收起）" hidden>⤢ 放大</button>
       </div>
       <ul class="movelist" id="movelist"></ul>
       <div class="branch-tree" id="branch-tree" hidden></div>
@@ -303,6 +307,22 @@
     <h2 id="ba-title">全盘讲解</h2>
     <div id="ba-body" class="ba-body"></div>
     <div class="mrow ba-actions" id="ba-actions"></div>
+  </div>
+</div>
+
+<!-- 分支树放大窗口（2026-10-14 首相要求「展开一个大窗口方便找分支」）。
+     ★ 做法是**把 #branch-tree 这个元素整个搬进来**，不是再渲染一份 ——
+       那上面挂着一大堆事件（点珠子跳转 / 右键菜单 / 拖动平移 / 悬停浮层），
+       而且 id、treeCells、虚拟化窗口都按它算。搬家之后渲染与交互一行都不用改，
+       也不会出现"小窗和大窗状态不同步"。关掉时再搬回原来的位置。 -->
+<div class="modal-mask treezoom" id="treezoom">
+  <div class="modal treezoom-box">
+    <div class="treezoom-head">
+      <span class="card-title">分支树</span>
+      <span class="treezoom-hint">左键点珠子 = 跳到那一手 · 右键 = 提升主变 / 删除分支 · 按住右键拖动 = 平移 · 滚轮 = 左右看</span>
+      <button id="btn-treezoom-close" class="mini-btn">收起（Esc）</button>
+    </div>
+    <div class="treezoom-slot" id="treezoom-slot"></div>
   </div>
 </div>
 

@@ -15,6 +15,12 @@
   await sleep(300);
   out.push('手数=' + state.moves.length + '  珠子=' + treeCells.length + '  行数=' + treeLanes
     + '  最大深度=' + treeMaxDepth);
+  /* ★ 2026-10-14：再点一下「放大」，把大窗口的样子也拍下来 */
+  const zb = document.getElementById('btn-treezoom');
+  if (zb) { zb.click(); await sleep(600); }
+  if (box) box.scrollLeft = 0;
+  await sleep(300);
+  out.push('放大窗宽=' + (box ? box.clientWidth : -1) + '  在大窗里=' + !!(box && box.closest('#treezoom')));
   await sleep(30000);
   return out.join('\n');
 })();

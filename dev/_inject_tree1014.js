@@ -34,21 +34,41 @@
   viewBtn('tree').click(); await sleep(260);
   ok('T0 前置：树上珠子数 > 8（分支确实造出来了）', treeCells.length > 8, '珠子 ' + treeCells.length + ' 颗');
 
-  /* ---------- ① ★ 核心：任何一条下落线段上都没有别的珠子 ---------- */
-  let conflict = 0, firstBad = '';
+  /* ---------- ① ★ 实际能保证的第一条：同一行上不会有两个"互不为祖先"的节点 ----------
+   * （"下落线绝不穿过任何珠子"那个理想判据**放弃**了 —— 见 app.js 里 treeLayout 的注释：
+   *   为它写了两版"找行"判据，两版都不收敛：一版死循环卡死渲染进程，一版把支分到第 514 行。
+   *   现在的保证是**序号即行号**：同一行上的节点必然是同一条主链上的前后手，绝不互相压。 */
+  const rowMap = new Map();
+  let rowClash = 0, clashAt = '';
+  for (const c of treeCells) {
+    const arr = rowMap.get(c.row) || [];
+    for (const o of arr) {
+      /* 同一行里，两个节点的深度必须不同（同一条链上前后手）——
+         深度相同还同行 = 两条不同的支挤在同一行，那才是真冲突 */
+      if (o.depth === c.depth) { rowClash++; if (!clashAt) clashAt = '行' + c.row + ' 有两个第' + c.depth + '手'; }
+    }
+    arr.push(c);
+    rowMap.set(c.row, arr);
+  }
+  ok('T1 ★ 同一行上不会有两条不同的支（序号即行号 → 绝不重叠）',
+    rowClash === 0, rowClash ? clashAt : '零冲突，共 ' + treeLanes + ' 行');
+
+  /* ---------- ①b ★★ 首相明确要的那条：靠前的分叉要排在靠上的行 ---------- */
+  /* 「分叉手数越小 → 行号越小」。上一版用深度优先分配，正好反了（175 的支在最下、182 的在上），
+     这条断言就是照那个 bug 写的。 */
+  const heads = [];
   for (const c of treeCells) {
     const pp = treePosOf.get(c.node._p);
-    if (!pp || pp.r === c.row) continue;                 // 只查"侧支起头"那种竖线段
-    const lo = Math.min(pp.r, c.row), hi = Math.max(pp.r, c.row);
-    for (const other of treeCells) {
-      if (other === c) continue;
-      if (other.depth !== pp.d || other.row <= lo || other.row >= hi) continue;
-      conflict++;
-      if (!firstBad) firstBad = '第' + other.depth + '手/行' + other.row + ' 挡在第' + pp.d + '手的下落线上';
-    }
+    if (pp && pp.r !== c.row) heads.push({ d: c.depth, r: c.row });   // 侧支的起头
   }
-  ok('T1 ★ 任何一条侧支的下落线段上都没有别的珠子 → **数学上不可能交叉**',
-    conflict === 0, conflict ? (conflict + ' 处冲突，首个：' + firstBad) : '零冲突');
+  heads.sort((a, b) => a.d - b.d);
+  let orderBad = 0, orderAt = '';
+  for (let i = 1; i < heads.length; i++) {
+    if (heads[i].r < heads[i - 1].r) { orderBad++; if (!orderAt) orderAt = '第' + heads[i].d + '手的分叉排在行' + heads[i].r + '，却比第' + heads[i - 1].d + '手的（行' + heads[i - 1].r + '）还靠上'; }
+  }
+  ok('T1b ★ 分叉越靠前 → 行号越小（靠前的分支排在靠上 —— 首相要的顺序）',
+    orderBad === 0 && heads.length >= 2,
+    orderBad ? orderAt : heads.map(h => '第' + h.d + '手→行' + h.r).join('  '));
 
   /* ---------- ② 主变继承父行：主变那串应该整条待在第 0 行 ---------- */
   const mainRows = new Set();

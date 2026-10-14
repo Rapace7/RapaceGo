@@ -18,6 +18,14 @@ setlocal EnableExtensions
 
 set ELECTRON_RUN_AS_NODE=
 
+rem --- debug port: %1, default 9333 ---
+rem 2026-10-14: made it a parameter. Reason: another app (Edge) had taken 9333,
+rem so this script's app silently ran WITHOUT a debug port -- and the test
+rem scripts then connected to that other app's page and reported nonsense
+rem (e.g. "settings is not defined"). Pass a free port to avoid the clash.
+set PORT=%~1
+if "%PORT%"=="" set PORT=9333
+
 rem --- normalize the project root (strip the trailing \dev\.. ) ---
 pushd "%~dp0.."
 set ROOT=%CD%
@@ -41,23 +49,23 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-echo [launcher] starting app with --remote-debugging-port=9333>>"%LOG%"
-start "" "%EXE%" "%ROOT%" --remote-debugging-port=9333 --user-data-dir="%PROFILE%"
+echo [launcher] starting app with --remote-debugging-port=%PORT%>>"%LOG%"
+start "" "%EXE%" "%ROOT%" --remote-debugging-port=%PORT% --user-data-dir="%PROFILE%"
 
-echo [launcher] waiting for port 9333 ...>>"%LOG%"
+echo [launcher] waiting for port %PORT% ...>>"%LOG%"
 
 rem --- poll the port for up to ~25s, log the verdict ---
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ok=$false; for($i=0;$i -lt 50;$i++){ try{ $r=Invoke-WebRequest -Uri 'http://127.0.0.1:9333/json/version' -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -eq 200){ $ok=$true; break } }catch{}; Start-Sleep -Milliseconds 500 }; if($ok){ Add-Content -Path '%LOG%' -Value '[launcher] RESULT: PORT-9333-OK' } else { Add-Content -Path '%LOG%' -Value '[launcher] RESULT: PORT-9333-DEAD' }"
+  "$p='%PORT%'; $ok=$false; for($i=0;$i -lt 50;$i++){ try{ $r=Invoke-WebRequest -Uri ('http://127.0.0.1:'+$p+'/json/version') -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -eq 200){ $ok=$true; break } }catch{}; Start-Sleep -Milliseconds 500 }; if($ok){ Add-Content -Path '%LOG%' -Value ('[launcher] RESULT: PORT-'+$p+'-OK') } else { Add-Content -Path '%LOG%' -Value ('[launcher] RESULT: PORT-'+$p+'-DEAD') }"
 
-findstr /C:"PORT-9333-OK" "%LOG%" >nul
+findstr /C:"PORT-%PORT%-OK" "%LOG%" >nul
 if %ERRORLEVEL%==0 (
   echo.
-  echo   OK - debug port 9333 is up.
+  echo   OK - debug port %PORT% is up.
   echo   Keep the RapaceGo window OPEN, then tell the assistant.
 ) else (
   echo.
-  echo   PROBLEM - the app started but port 9333 is not listening.
+  echo   PROBLEM - the app started but port %PORT% is not listening.
   echo   Details are in:  %LOG%
 )
 
