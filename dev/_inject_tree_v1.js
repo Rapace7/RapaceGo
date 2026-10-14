@@ -46,13 +46,20 @@
      treeCells.some(c => c.row === 0) && treeCells.some(c => c.row >= 1),
      '行号: ' + [...new Set(treeCells.map(c => c.row))].join(','));
 
-  /* ---------- 2) 12a 式手数印在珠心 ---------- */
+  /* ---------- 2) 手数印在珠心 ----------
+     ★ 2026-10-14：**字母后缀去掉了**（首相要求「别的软件怎么做就怎么做」）——
+     业界（Sabaki / Lizzie / KaTrain）靠**纵向位置**区分各条变着，节点上只写真实手数。
+     于是旁支的手数会与主线**重复**（都是 4、5），这是**有意为之**。
+     判据相应改成：① 数字都在；② **一个后缀字母都没有**。 */
   const allLabels = treeCells.map(c => moveLabelOf(c.node));
-  ok('②1 旁支标了 4a / 5a（字母后缀）', allLabels.includes('4a') && allLabels.includes('5a'), allLabels.join(','));
+  ok('②1 旁支只标真实手数、**不带字母后缀**（靠纵向位置区分各条变着 —— 业界惯例）',
+    allLabels.includes('4') && allLabels.includes('5') && !allLabels.some(x => /[a-z]$/i.test(x)),
+    allLabels.join(','));
   ok('②2 主线手号是纯数字（1..5 都在）', ['1', '2', '3', '4', '5'].every(x => allLabels.includes(x)));
   /* 7 手全在窗口内（窄树也放得下），DOM 抽查珠子确实把字印出来了 */
   const domLabels = [...document.querySelectorAll('#branch-tree .cap b')].map(b => b.textContent);
-  ok('②3 珠心真的印着手数（含 4a）', domLabels.includes('4a'), domLabels.join(','));
+  ok('②3 珠心真的印着手数（是数字，不是空）',
+    domLabels.length > 0 && domLabels.every(x => /^\d+$/.test(x)), domLabels.join(','));
   /* 颜色反色：黑子白字 / 白子黑字由 CSS 类保证 —— 查类在不在 */
   const kCell = cellOf(bkNode);   // K10 是白子（tryPlay 到Move 4 = 白）
   ok('②4 珠子按黑白带子色类', !!kCell && capAt(kCell.depth, kCell.row).classList.contains('sw'),

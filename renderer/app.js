@@ -776,26 +776,24 @@ function onMainline(node) {
   return !!node;
 }
 
-/* ---------------- 12a 式手号（任务 2，设计方案决策 6） ---------------- */
-/* 一个节点的显示名。纯函数（只吃 node），所以能在探针里直接单测、不受界面状态影响。
-   规则（施工单定死）：数字 = 离根几步（与走哪条支无关）；
-   后缀 = 往上找**第一个**「岔口祖先」（该祖先 _cs.length>1 且自己不是它的 _cs[0]），
-   自己在 _cs 里的下标 1→a、2→b…；同一支上所有手共用同一个后缀（天然如此）。 */
+/* ---------------- 手数（★ 2026-10-14：去掉了 a/b 后缀） ----------------
+ * 一个节点的显示名 = **离根几步**。纯函数（只吃 node），能在探针里直接单测、不受界面状态影响。
+ *
+ * ★★ 2026-10-14 首相实测：「大量 a 和 b 的命名这不对吧」—— 对。那套是我自己设计的
+ *   「12a 式手号」（设计方案决策 6）：分岔后同一支上的手共用同一个字母后缀。
+ *   但**业界不这么标**：Sabaki / Lizzie / KaTrain 的树都靠**位置**区分各条变着
+ *   （同一深度的不同支，在纵向上分开放），节点上只写真实手数。
+ *   而且多层分叉时后缀会炸出一串 a/b/c…，越看越乱 —— 首相看到的正是这个。
+ *   所以按首相要求「别的软件怎么做就怎么做」：**只显示手数、靠位置区分**。
+ *   「这里分岔了」的提示由珠子上的 ▾ / +n 角标负责，那比后缀清楚得多。
+ *
+ * ⚠️ 手数列表（renderMoveList）也调它，但那边只列**当前路径**上的手，
+ *    `depth` 恒等于 `i + 1` —— 所以去掉后缀对列表没有任何影响（旁支的重复手数不会出现在列表里）。 */
 function moveLabelOf(node) {
   if (!node) return '';
-  let depth = 0, suffix = '';
-  let cur = node;
-  while (cur && cur._p) {
-    depth++;
-    const p = cur._p;
-    /* 只认「自己不是主变那条」的岔口；从下往上走，**第一个**遇到的岔口就是最近的 */
-    if (!p._virtual && p._cs && p._cs.length > 1) {
-      const i = p._cs.indexOf(cur);
-      if (i > 0 && !suffix) suffix = String.fromCharCode(96 + Math.min(i, 26));
-    }
-    cur = p;
-  }
-  return String(depth) + suffix;
+  let depth = 0;
+  for (let cur = node; cur && cur._p; cur = cur._p) depth++;
+  return String(depth);
 }
 
 /* ---------------- 提升主变（段②，2026-10-13） ----------------
@@ -1123,6 +1121,11 @@ let treeRaf = 0;
 /* 棋子定尺寸（珠子小，列宽固定也**不会重叠** —— 和上一版胶囊"按内容估宽"不同）。
    STP = 直径，TREE_W = 列距（含珠子间距，手串的"珠距"），TREE_H = 行距。 */
 const STP = 24, TREE_W = 34, TREE_H = 40;
+/* ★ 2026-10-14 加：树面板左右留白。
+   原来左上是「零距离贴边」的 —— 第一颗珠子（第 1 手）紧贴左边界，
+   连它上面的折叠角标（▾ / +n）都被切掉一半，看着像坏了（首相实测报的）。
+   横竖各留一点：左边 PAD_X 给"入线"和角标留位，顶部 PAD_Y 给角标留位。 */
+const TREE_PAD_X = 14, TREE_PAD_Y = 10;
 
 /* 这一手「离根几步」= 路径长度（虚拟根不算手） */
 function nodeDepth(node) {
@@ -1177,68 +1180,63 @@ function nodeDeltaTxt(node, depth) {
 function treeLayout() {
   ensureBranch();
   treeCells = []; treeLanes = 1; treeMaxDepth = 0;
-  const rowOcc = [];                                   // 行号 → 该行已占用的列集合
-  const occOf = r => (rowOcc[r] || (rowOcc[r] = new Set()));
-  let nextRow = 1;
 
-  /* 子树「会画出来的列跨度」（折叠掉的侧支不算） */
-  const spanOf = n => {
-    if (treeCollapsed.has(n)) return 1;
-    let best = 1;
-    for (const c of (n._cs || [])) { const s = 1 + spanOf(c); if (s > best) best = s; }
-    return best;
-  };
-
-  /* 给一条侧支找行：先找能复用的旧行，全碰就新开一行。
-     约束①：本支列区间 [startD, startD+len-1] 在该行上无人占用；
-     约束②：下落线所在列 dropD，从父行到目标行**途经的每一行**（含目标行）不许有珠子。 */
-  const pickRow = (startD, len, dropD, fromRow) => {
-    for (let r = 0; r < nextRow; r++) {
-      if (r === fromRow) continue;
-      const occ = occOf(r);
-      let clash = false;
-      for (let d = startD; d < startD + len; d++) if (occ.has(d)) { clash = true; break; }
-      if (clash) continue;
-      const lo = Math.min(fromRow, r), hi = Math.max(fromRow, r);
-      let lineHit = false;
-      for (let rr = lo + 1; rr <= hi; rr++) if (occOf(rr).has(dropD)) { lineHit = true; break; }
-      if (!lineHit) return r;
-    }
-    const r = nextRow++;
-    if (r + 1 > treeLanes) treeLanes = r + 1;
-    return r;
-  };
-
-  const walk = (node, depth, row) => {
+  /* ★★ 2026-10-14 重写（首相实测：打开柯洁VS芈昱廷那盘打谱谱，「都交叉在一起，看都看不明白」）。
+   *
+   * 【旧做法为什么必然交叉】
+   *   主变**恒占第 0 行**、往右一条线走到底；每条侧支调 `pickRow` 去"复用"某个已有行，
+   *   而且要求下落线「途经的每一行都不许有珠子」。问题是：**复用行就等于让下落线跨过中间那些行**，
+   *   一旦分支密集（打谱谱的变着动辄几十条），避让**无解** → 只能硬塞 → 交叉成一团。
+   *   这不是参数没调好，是范式选错了。
+   *
+   * 【新做法 —— 业界通行范式（Sabaki / Lizzie 都是这个路子）】
+   *   · **深度 = 横轴**，**分叉 = 纵轴**，每个节点只占一格；
+   *   · **主变（`_cs[0]`）继承父节点的行**，沿同一条水平航道继续往右；
+   *   · **每条侧支新开一行**，行号**全局递增、绝不与他人共用**。
+   *   于是任何一条下落线的"两侧"永远是空行 → **数学上不可能交叉**。
+   *   代价是行数比旧做法多（每条侧支独占一行），但那正是"看得明白"要付的代价。
+   *
+   * 【为什么用深度优先 + 全局递增】
+   *   主变先整条走完（一步不占新行），然后第一条侧支拿下一行、并把它**整棵子树**连续铺在
+   *   紧随其后的行上 —— 于是"同一条支"在纵向上是**连成一片**的，一眼能圈出来。
+   *
+   * ⚠️ 折叠（`treeCollapsed`）只影响**画不画**侧支，不影响主变的行号。 */
+  let nextRow = 0;
+  const place = (node, depth, row) => {
     if (!node._virtual) {
       treeCells.push({ node, depth, row });
-      occOf(row).add(depth);
+      if (row + 1 > treeLanes) treeLanes = row + 1;
       if (depth > treeMaxDepth) treeMaxDepth = depth;
     }
     const cs = node._cs || [];
     if (!cs.length) return;
-    walk(cs[0], depth + 1, row);                       // 主变孩子：留在本行
-    if (cs.length > 1) {
-      if (treeCollapsed.has(node)) return;             // 折起了：侧支整批不画（珠子上给 +n）
-      for (let i = 1; i < cs.length; i++) {            // 每条侧支：找行 → 递归
-        const len = spanOf(cs[i]);
-        const r = pickRow(depth + 1, len, depth, row);
-        walk(cs[i], depth + 1, r);
-      }
+    /* ★ 顺序不能换：**主变永远要画**，折叠折的是「侧支」那几条（_cs[1..]）。
+       我第一版把折叠判断放在了 place(cs[0]) **之前** —— 于是折叠时连主线都不画了，
+       表现为"按 C 折叠后整棵树只剩三颗珠子"（_inject_tree_v1 的 ⑥1 抓到的）。 */
+    place(cs[0], depth + 1, row);                 // ★ 主变：继承本行，继续往右
+    if (treeCollapsed.has(node)) return;          // 折起了：侧支整批不画（珠子上给 +n）
+    for (let i = 1; i < cs.length; i++) {         // ★ 其余每条：各占一个新行
+      nextRow += 1;
+      place(cs[i], depth + 1, nextRow);
     }
   };
-  walk(branchRoot, 0, 0);
+  place(branchRoot, 0, 0);
 
   treePosOf = new Map();
   for (const c of treeCells) treePosOf.set(c.node, { d: c.depth, r: c.row });
-  treeTotalW = 12 + treeMaxDepth * TREE_W;
+  /* ★ 左右各留一点边：左上角那颗珠子原来「零距离贴边」，连它上面的折叠角标都被切掉
+     （首相 2026-10-14 报的）。左边留 TREE_PAD_X，右边也留等量，滚到头不会顶着边。 */
+  treeTotalW = TREE_PAD_X * 2 + 6 + Math.max(1, treeMaxDepth) * TREE_W;
 }
 
 let treePosOf = new Map();
 let treeTotalW = 0;
 
-/* 珠子行中线（连线要按它接进珠心；列方向各处直接写 6 + (d-1)*TREE_W，口径一致） */
-const stoneCy = r => 4 + r * TREE_H + STP / 2;
+/* 珠子行中线（连线要按它接进珠心；列方向各处直接写 TREE_PAD_X + 6 + (d-1)*TREE_W，口径一致）
+   ★ 2026-10-14：顶部加 TREE_PAD_Y —— 第一行的珠子原来紧贴上边，折叠角标被切掉一半。 */
+const stoneCy = r => TREE_PAD_Y + 4 + r * TREE_H + STP / 2;
+/* ★ 2026-10-14：珠子所在列的左上角 x（唯一口径，画线与画珠子都用它，免得对不齐） */
+const stoneX = d => TREE_PAD_X + 6 + (d - 1) * TREE_W;
 
 /* 画可见窗口内的珠子与连线。珠子定尺寸 + 列距固定 → 窗口按 scrollLeft / TREE_W 直接算列号。 */
 function treePaint() {
@@ -1246,8 +1244,10 @@ function treePaint() {
   if (!box || box.hidden) return;
   const inner = box.firstElementChild;
   if (!inner) return;
-  const d0 = Math.max(1, Math.floor(box.scrollLeft / TREE_W));
-  const d1 = Math.min(treeMaxDepth, Math.ceil((box.scrollLeft + box.clientWidth) / TREE_W) + 1);
+  /* 虚拟化只画看得见的列。★ 列坐标一律走 stoneX()（含左边距），避免两处算法对不齐。 */
+  const d0 = Math.max(1, Math.floor((box.scrollLeft - TREE_PAD_X) / TREE_W));
+  const d1 = Math.min(treeMaxDepth,
+    Math.ceil((box.scrollLeft + box.clientWidth - TREE_PAD_X) / TREE_W) + 1);
   const curNode = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
 
   /* 主变链 = 从根沿每层 _cs[0] 一路到底。链上的珠子带**金色外圈**（首相 2026-10-13 定的）——
@@ -1259,9 +1259,11 @@ function treePaint() {
   let html = '';
   /* ① 连线先画（珠子后画、压在它上面 —— 线从**珠心穿到珠心**，两端被珠子盖住，
      看上去就是手串的绳把珠子一颗颗穿起来，首相 2026-10-13 看图二定的口径）。
-     同航道 = 一段水平线；侧支 = 从父珠心垂直下落（挂在父列中线上，布局已保证
-     不穿过中间行的珠子），到本行中线再水平接进支首珠心。 */
-  const cx = d => 6 + (d - 1) * TREE_W + STP / 2;      // 某列珠子的中心 x
+     · 同航道（父与本节点同一行）= 一段水平线；
+     · 侧支起头 = 从父珠心**垂直下落**到本行中线，再水平接进本珠心。
+     ★ 2026-10-14：布局改成"侧支独占一行"之后，下落线段的两侧永远是**空行**，
+       所以这两笔**不可能再压到别的珠子上** —— 旧做法那套避让（pickRow）连同交叉一起删掉了。 */
+  const cx = d => stoneX(d) + STP / 2;                 // 某列珠子的中心 x
   for (const c of treeCells) {
     if (c.depth < d0 || c.depth > d1) continue;
     const m = c.node, p = m._p;
@@ -1290,7 +1292,7 @@ function treePaint() {
       ? `<i class="tf" data-fold="1" title="${folded ? '展开侧支（' + (cs.length - 1) + ' 条）' : '折叠侧支（' + (cs.length - 1) + ' 条）'}">${folded ? '+' + (cs.length - 1) : '▾'}</i>`
       : '';
     html += `<div class="cap s${m.color} ${m === curNode ? 'cur' : ''} ${mainSet.has(m) ? 'main' : ''} ${folded ? 'folded' : ''}"`
-      + ` data-d="${c.depth}" data-r="${c.row}" style="left:${6 + (c.depth - 1) * TREE_W}px;top:${4 + c.row * TREE_H}px">`
+      + ` data-d="${c.depth}" data-r="${c.row}" style="left:${stoneX(c.depth)}px;top:${TREE_PAD_Y + 4 + c.row * TREE_H}px">`
       + (state.treeNum ? `<b>${moveLabelOf(m)}</b>` : '') + fold + '</div>';
   }
   inner.innerHTML = html;
@@ -1303,15 +1305,21 @@ function renderMoveTree() {
   if (movesView !== 'tree') return;
   treeLayout();
   box.firstElementChild.style.width = treeTotalW + 'px';
-  box.firstElementChild.style.height = (8 + treeLanes * TREE_H) + 'px';
+  /* ★ 2026-10-14：上下都留白（原来只留了底部 8px，顶部 0 —— 第一行的折叠角标被切掉）。 */
+  box.firstElementChild.style.height = (TREE_PAD_Y * 2 + treeLanes * TREE_H) + 'px';
   treePaint();
   /* 把当前手滚进视野（只在位置变化时滚，理由同 renderMoveList 的滚动） */
   const curNode = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
   const cell = curNode && treeCells.find(c => c.node === curNode);
   if (cell) {
-    const x = 6 + (cell.depth - 1) * TREE_W;
+    const x = stoneX(cell.depth);
     if (x < box.scrollLeft + STP || x > box.scrollLeft + box.clientWidth - STP - 2) {
       box.scrollLeft = Math.max(0, x - box.clientWidth / 2);
+    }
+    /* ★ 纵向也跟着滚 —— 侧支独占一行之后行数多了，当前手很可能在视野外（旧做法行少，没这问题）。 */
+    const y = TREE_PAD_Y + 4 + cell.row * TREE_H;
+    if (y < box.scrollTop || y + TREE_H > box.scrollTop + box.clientHeight) {
+      box.scrollTop = Math.max(0, y - box.clientHeight / 2 + TREE_H / 2);
     }
   }
 }

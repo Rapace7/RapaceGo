@@ -289,12 +289,19 @@
      state.moves.map(m => moveLabelOf(m)).join(','));
   gotoView(3); await sleep(60);
   const mk = G('K10'); tryPlay(mk.x, mk.y); await sleep(150);
-  ok('⑭2 旁支那一手显示 4a', moveLabelOf(state.moves[3]) === '4a', moveLabelOf(state.moves[3]));
+  /* ★ 2026-10-14：**后缀去掉了**（首相要求「别的软件怎么做就怎么做」）。
+     业界靠**纵向位置**区分各条变着，节点/列表上只写真实手数 ——
+     所以旁支第 4 手显示的仍是 `4`（与主线那手同号），这是有意为之。
+     判据改成：**是纯数字、且与"离根几步"一致**（不再要求字母后缀）。 */
+  ok('⑭2 旁支那一手显示真实手数 4（不带后缀）',
+    moveLabelOf(state.moves[3]) === '4', moveLabelOf(state.moves[3]));
   const mk2 = G('L10'); tryPlay(mk2.x, mk2.y); await sleep(150);
-  ok('⑭3 旁支延长一手 → 5a（后缀沿用）', moveLabelOf(state.moves[4]) === '5a', moveLabelOf(state.moves[4]));
+  ok('⑭3 旁支延长一手 → 5（仍是纯手数）',
+    moveLabelOf(state.moves[4]) === '5', moveLabelOf(state.moves[4]));
   /* 列表里真的显示出来了吗（不能只在函数里对） */
   const nos = [...document.querySelectorAll('#movelist .no')].map(e => e.textContent);
-  ok('⑭4 列表上真的写着 4a / 5a', nos.includes('4a') && nos.includes('5a'), nos.join(','));
+  ok('⑭4 列表上写着 1..5 的纯手数（当前路径的手号，无后缀）',
+    nos.join(',') === '1,2,3,4,5', nos.join(','));
 
   /* ---------- ⑮ 2026-10-13 深夜 Qoder 审查修复（坑位 38 / 39 / 42） ----------
      这一组是真界面侧的补账：纯 node 那套（dev/_verify_fixes_1013.js）已经锁住逻辑，
