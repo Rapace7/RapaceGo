@@ -1,0 +1,16 @@
+const P=9666;
+const v=await(await fetch(`http://127.0.0.1:${P}/json/version`)).json();
+const l=await(await fetch(`http://127.0.0.1:${P}/json/list`)).json();
+const pg=l.find(x=>x.type==='page'&&x.webSocketDebuggerUrl);
+console.log('targets:', l.map(x=>x.type+':'+x.title).join(' | '));
+const ws=new WebSocket(v.webSocketDebuggerUrl);let n=0;const pend=new Map();
+ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}};
+await new Promise((r,j)=>{ws.onopen=r;ws.onerror=()=>j(new Error('ws'))});
+const send=(me,pa,s)=>new Promise(r=>{const i=++n;const t=setTimeout(()=>r({timeout:1}),15000);pend.set(i,m=>{clearTimeout(t);r(m)});ws.send(JSON.stringify({id:i,method:me,params:pa||{},...(s?{sessionId:s}:{})}))});
+const a=await send('Target.attachToTarget',{targetId:pg.id,flatten:true});const sid=a.result.sessionId;
+const ev=async x=>{const r=await send('Runtime.evaluate',{expression:x,returnByValue:true,awaitPromise:true},sid);if(r.timeout)return 'TIMEOUT';if(r.result&&r.result.exceptionDetails)return 'ERR '+String(r.result.exceptionDetails.exception?.description||'').split('\n')[0];return r.result.result.value};
+console.log('1+1 =', await ev('1+1'));
+console.log('版本 =', await ev('(document.querySelector(".ver-tag")||{}).textContent || document.title'));
+console.log('棋盘格 =', await ev('document.querySelectorAll("#board-canvas,canvas").length'));
+console.log('引擎路径探测 =', await ev('(typeof enginePath!=="undefined")?enginePath:"(无此变量)"'));
+ws.close();process.exit(0);

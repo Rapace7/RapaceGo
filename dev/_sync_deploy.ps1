@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  同步到「正式版」目录 —— 打包之后跑这一条
 #
 #  用法（注意：Windows PowerShell 5.1 读 UTF-8 脚本需要 BOM，
@@ -61,22 +61,41 @@ Write-Host "  目标：$DeployDir"
 if (-not (Test-Path $DeployDir)) { throw "目标目录不存在：$DeployDir" }
 
 # ---------- 1) 备份现有正式版（可回退） ----------
-Step "1/5" "备份现有正式版（可回退）"
+#  ★★ 2026-10-14 深夜改：备份**排除引擎目录**（KataGo\ LoGos\）—— 别再全量复制模型权重。
+#
+#     背景：引擎自 2026-10-09 起搬进免解压版内部（见下面第 2 步的保留清单），
+#           而这两个目录是**几 GB 的模型权重**。于是 `robocopy /E` 的全量备份
+#           从「每份 368MB」暴涨到「每份 ~8GB」，留 $KeepBackups 份就是十几 GB。
+#           用户原话：「你每次都把模型权重给存了一份，一个完整备份包就需要 8G 左右的空间，
+#                     实在是太浪费了」。
+#
+#     排除它们**是安全的**，三条理由：
+#       ① 同步流程本来就不动它们（第 2 步 `$keep` 里保着），备份里有没有都一样；
+#       ② 回退时它们原样躺在 $DeployDir 里，**不需要**从备份恢复；
+#       ③ 引擎内容基本不变，真要留底留一份就够，不必每次同步都跟着复制一遍。
+#
+#     ⇒ 改后备份里只有"程序本体"（exe + resources\app + dll + pak…），约 300~400MB。
+Step "1/5" "备份现有正式版（可回退，**已排除引擎**）"
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $bak = Join-Path $WRoot "_backup_玄清围弈_$stamp"
+# 这些目录不进备份（就是引擎的模型权重，几 GB）
+$noBakDirs = @('KataGo', 'LoGos') | ForEach-Object { Join-Path $DeployDir $_ }
 if ($NoBackup) {
   Write-Host "  已指定 -NoBackup：跳过备份（出问题就只能重打包）"
 } elseif ($DryRun) {
-  Write-Host "  [DryRun] 会备份到 $bak"
+  Write-Host "  [DryRun] 会备份到 $bak（排除 KataGo\ LoGos\）"
 } else {
   New-Item -ItemType Directory -Path $bak -Force | Out-Null
-  robocopy $DeployDir $bak /E /NFL /NDL /NJH /NJS /NP | Out-Null
-  $n = (Get-ChildItem $bak -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
-  Write-Host "  备份到 $bak（$n 个文件）"
+  robocopy $DeployDir $bak /E /NFL /NDL /NJH /NJS /NP /XD $noBakDirs | Out-Null
+  $sum = Get-ChildItem $bak -Recurse -File -ErrorAction SilentlyContinue |
+         Measure-Object -Property Length -Sum
+  Write-Host "  备份到 $bak（$($sum.Count) 个文件，$([int]($sum.Sum / 1MB)) MB —— 不含引擎）"
   # ★ 2026-10-06 深夜：备份必须限量。
   #   每一份是 368MB 的完整程序目录 —— 一晚同步 4 次就 1.5GB，
   #   用户直接问「你给我在 GoStudy 里新增的两个 backup 文件夹是啥玩意」。
   #   现在只留最近 $KeepBackups 份，旧的删掉（进回收站，仍可捞）。
+  #   ⚠️ 2026-10-14：上面那个 368MB 是"引擎还没搬进免解压版"时的数字；
+  #      排除引擎之后又回到这个量级了（这才是它该有的样子）。
   $olds = Get-ChildItem $WRoot -Directory -Filter "_backup_玄清围弈_*" |
           Sort-Object CreationTime -Descending | Select-Object -Skip $KeepBackups
   if ($olds) {

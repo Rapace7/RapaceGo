@@ -7,12 +7,19 @@
  *   R4 刷新按钮：正常/卡住两种情况下都要可用
  *   R5 界面一致性：手数列表条数 = 手数、候选点数、帮助面板新增条目都在
  */
-const PORT = 9333;
+/* ⚠️ 2026-10-14 晚：端口原来**写死 9333**（就是这一行），后果实测踩到 ——
+ * 9333 被另一个项目（D:\DSH 的 Edge headless）占着时，本脚本会连到**别人的页面**去求值，
+ * 于是报出与本项目毫不相干的错（实测：`engineReady is not defined`）。
+ * 现在：命令行参数 > 环境变量 CDP_PORT > 9333。 */
+const PORT = Number(process.argv[2] || process.env.CDP_PORT || 9333);
 async function getPage() {
   for (let i = 0; i < 60; i++) {
     try {
       const l = await (await fetch('http://127.0.0.1:' + PORT + '/json/list')).json();
-      const p = l.find(x => x.type === 'page' && x.webSocketDebuggerUrl);
+      /* ★ 2026-10-14 晚：必须排除 edge:// 之类的**非本应用页面** ——
+         别的开发实例（例如 D:\DSH 的 Edge headless）占用同一端口时，
+         不排除就会把断言跑在别人的页面里，报出一堆莫名其妙的错。 */
+      const p = l.find(x => x.type === 'page' && x.webSocketDebuggerUrl && !/^(edge|devtools|chrome):/.test(x.url));
       if (p) return p;
     } catch (e) { }
     await new Promise(r => setTimeout(r, 500));

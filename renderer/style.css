@@ -403,9 +403,12 @@ main { flex: 1; display: flex; min-height: 0; }
   flex: 1; min-height: 0; overflow: auto;
   display: flex; background: var(--line-soft); border-radius: 6px;
   position: relative;
-  /* ★ 2026-10-14：纵向居中。树只有一两行时（比如只看主变最近这一小段），
-     原来会贴着顶、下面一大片空白；居中之后画面重心回到中间，放大窗里尤其明显。 */
-  align-items: center;
+  /* ★★ 2026-10-14 晚：**不要** align-items:center（首相报的「连最上面都拉不上去」）。
+     原因：`center` 在"内容比容器高"时会让内容**上溢到容器的上方**，
+     而滚动区只能滚到内容顶部 —— 那段上溢部分就**永远够不着**了（顶部被吃掉）。
+     树短的时候居中确实好看，但"滚不到顶"是硬伤，不值得换。
+     → 一律顶部对齐，长树短树都不会出问题。 */
+  align-items: flex-start;
 }
 .branch-tree[hidden] { display: none; }
 .branch-tree.panning { cursor: grabbing; user-select: none; }
@@ -444,6 +447,10 @@ main { flex: 1; display: flex; min-height: 0; }
 .ln { position: absolute; background: #b8b2a4; height: 2px; border-radius: 1px; }
 .ln.ln-main { background: #cfa63e; }              /* 主变那段带金色调，呼应金圈 */
 .ln.ln-br { background: #b8b2a4; }
+/* ★ 2026-10-15 首相要求：选中某一手时，从它**往上追溯到主干第一手**的这条直系链，
+   连线高亮成**绿色**（只亮绿线 —— 沿途珠子不亮外圈，外圈只给选中的那一手）。
+   ⚠️ 必须排在 `.ln.ln-main` 之后：两者同优先级，靠**顺序**覆盖掉主变那道金色。 */
+.ln.ln-hot { background: #35a854; box-shadow: 0 0 3px rgba(53, 168, 84, .55); }
 
 /* 节点 = 圆形棋子。手数印在珠心，用**相反色**（黑子白字 / 白子黑字）。 */
 .cap {

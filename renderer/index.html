@@ -319,7 +319,12 @@
   <div class="modal treezoom-box">
     <div class="treezoom-head">
       <span class="card-title">分支树</span>
-      <span class="treezoom-hint">左键点珠子 = 跳到那一手 · 右键 = 提升主变 / 删除分支 · 按住右键拖动 = 平移 · 滚轮 = 左右看</span>
+      <span class="treezoom-hint">左键点珠子 = 跳到那一手 · 点珠子右上角的角标 = 展开/收起那条支 · 右键 = 提升主变 / 删除分支 · 按住右键拖动 = 平移</span>
+      <!-- ★ 2026-10-14 深夜（首相：「默认全部收起，按需展开」）：
+           默认收起后，"想一次看全"得有个开关 —— 这两个按钮只作用在**展开集合**上，
+           关掉大窗不会自动收起（首相展开过的分支，回小窗照样是展开的）。 -->
+      <!-- ★ 2026-10-15 首相：只留「全部收起」（"那个有用"），「全部展开」已删（"那个没有用"）。 -->
+      <button id="btn-tree-none" class="mini-btn" title="全部收起来，只看主变">全部收起</button>
       <button id="btn-treezoom-close" class="mini-btn">收起（Esc）</button>
     </div>
     <div class="treezoom-slot" id="treezoom-slot"></div>

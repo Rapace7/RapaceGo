@@ -1114,13 +1114,41 @@ function branchInfoOf(at) {
  * 草稿手不在树里（段② 已保证：ensureBranch 串到 draft.from 就停），面板自然不显示。
  */
 let movesView = 'list';               // 'list' | 'tree' —— 标题旁滑杆切换（首相定的：让人一眼知道在看哪个）
-let treeCollapsed = new Set();        // 折起了侧支的节点（其 _cs[1..] 暂不画）
+/* ★★★★ 2026-10-14 深夜：折叠语义**反转**（首相：「全展开实在是太乱了，
+   应该是**默认全部收起、按需展开**」）。
+   旧 `treeCollapsed` 记"折起来的" → 默认空 = **全展开**，打谱谱一打开就是一屏珠子。
+   新 `treeExpanded` 记"**展开的**" → 默认空 = **全部收起**，只画主变 + 角标，
+   点珠子右上角的角标才把那一条支铺开。
+   ⚠️ `treeForceOpen` 由 treeLayout **每次重算**：当前显示那一手所在路径上"必须展开"的
+      父节点 —— 否则跳进某条支的第 5 手时，那颗珠子根本不在树上（看着像"点了没反应"）。
+   对外统一走 treeIsOpen()，别再直接读这两个集合。 */
+let treeExpanded = new Set();
+let treeForceOpen = new Set();
+const treeIsOpen = n => treeExpanded.has(n) || treeForceOpen.has(n);
+/* ★★ 2026-10-14 深夜：**展开的先后顺序**（首相：「先展开的应该被后展开的挤下去，
+   让最近展开的那个保持在最靠主干的地方」）→ 行分配按这个序**倒着**来（后展开的先挑行）。
+   ⚠️ 序号只在"用户真的点了角标 / 点了全部展开"时才发；自动展开（treeForceOpen）不发，
+      于是它们保持 0、按手数顺序排 —— 那正是"没动过手时"该有的样子。 */
+let treeExpandSeq = new Map();
+let treeExpandCounter = 0;
+const expandSeqOf = n => treeExpandSeq.get(n) || 0;
+/* 跨行的**斜线**（每条支只有第一条链节是斜的，其余是同行水平短线），
+   ★ 按"它跨过的每一行"分桶（row → [edge…]）：找行判碰时**只查这一行的桶**。
+   第一版是全量扫几百条线 → 真实棋谱"全部展开"实测 **16.4 秒**（2026-10-14 深夜踩到），
+   分桶之后同样的数据降到几十毫秒级。 */
+let treeEdges = new Map();   /* 保留这个名字只为兼容；v6 起布局内部改用 edgeList（存节点对，坐标现算） */
 let treeCells = [];                   // 布局结果：{node, depth, row}
 let treeLanes = 1, treeMaxDepth = 0;
 let treeRaf = 0;
 /* 棋子定尺寸（珠子小，列宽固定也**不会重叠** —— 和上一版胶囊"按内容估宽"不同）。
    STP = 直径，TREE_W = 列距（含珠子间距，手串的"珠距"），TREE_H = 行距。 */
-const STP = 24, TREE_W = 34, TREE_H = 40;
+const STP = 24, TREE_W = 40;
+/* ★★ 2026-10-14 晚：行距 40 → 52（首相报的「这些手基本全重叠起来了看都看不明白」）。
+   珠子 24px + 主变/当前手的圈约占 4px，40 的行距只剩 ~12px 空隙 ——
+   打谱谱分支多、行排得密时，上下两行的珠子看着就糊成一片。
+   52 留出 ~24px 空隙，一眼能分清行。列距（TREE_W=34）不动：
+   横向是"顺着看手数"，挤一点不影响判读；纵向才是"分辨不同的支"。 */
+const TREE_H = 52;
 /* ★ 2026-10-14 加：树面板左右留白。
    原来左上是「零距离贴边」的 —— 第一颗珠子（第 1 手）紧贴左边界，
    连它上面的折叠角标（▾ / +n）都被切掉一半，看着像坏了（首相实测报的）。
@@ -1169,134 +1197,251 @@ function nodeDeltaTxt(node, depth) {
 }
 
 /* 布局一遍树（含折叠）。每次状态变化后由 renderMoveTree 调。
- * ★ 行分配（首相 2026-10-13 看图二定的口径，KaTrain 式）：
- *   - 主变孩子留在父亲那一行；侧支各起一行；
- *   - **前后不碰的两条侧支允许共用一行**（列区间不相交就复用）；
- *   - 侧支的下落线挂在父珠中心那一列上，**不许穿过中间行的珠子** ——
- *     撞上了就往下找不碰的行（复用或新开），保证显示上不交叉。
- * 产出：treeCells / treePosOf / treeLanes / treeTotalW。
- * （旧版还产出一份 `treeBranches`「侧支落线」给胶囊版画线用；串珠版画线改成按 `treePosOf`
- *   现算，那份数据全项目没人读了 —— 2026-10-13 审查时删掉，别留"看着像有用"的死数组。） */
+ *
+ * ★★★★★ 行分配总则（2026-10-14 深夜：三次重写 + 一轮性能治理）
+ *
+ * 【首相要求一】「先展开的应该被后展开的挤下去，让**最近展开的那个保持在最靠主干的地方**」
+ *   → 放置顺序**按展开时间倒序**：最后展开的那条支**先挑行**，拿到最靠上的空行；
+ *     先展开的随后挑，被挤到下面去。（每次 treeLayout 都从零重算，重排天然发生。）
+ *
+ * 【首相要求二】「明显不会碰到的两条，居然没处在同一行……**这太浪费行数了**」
+ *   → 找行时**从父行的下一行开始**往上找，"**几何上真正放得下**"的行就共用 ——
+ *     列区间不重叠、线也不擦到对方珠子的两条支，会**自然共用同一行**。
+ *
+ * 【首相要求三】「尽量**不要出现交叉或者越过某一块**，而是**自适应上下让位**」
+ *   → 父行下面 K 行之内都放不下时，**不是**去树的最底下另起一行（那样线会横跨几百行、
+ *     穿过中间一整片），而是**在父行正下方插一个空行，把它下面的全部推开** ——
+ *     这就是"上下让位"。于是**每条支的连线永远只跨一行**，不可能越过别人的块。
+ *
+ * 【判据只有三条，每一条都能被断言直接验】
+ *   ① 格子不重叠；② 这一支的入线不碰任何已放置的珠子；③ 已放置的斜线不碰这一支的珠子。
+ *   ⚠️ 前三次翻车（死循环 / 第 514 行 / 行号 14）的根因都是**判据本身错**，不是"不该找行"。
+ *     纪律：**任何往这段里加的判据，都必须能用一条断言验出来**，否则不加。
+ *
+ * 【性能：实测数据与两轮治理（真实棋谱 181 手 / 457 条支 / 4720 颗珠子）】
+ *   第一版（逐行试到行尾 + 全量扫斜线）：**16.4 秒** —— 不能接受。
+ *   第二版（斜线按行分桶 + 链深列表只算一次）：14.5 秒 —— 只治了皮毛，瓶颈其实在"试行"。
+ *   第三版（**父行下面只看 K 行，放不下就插入一行让位**）：见下方 `findRow`。
+ *   ⇒ 教训：**先量再改**；一次只改一个变量，否则不知道是哪一处起了作用。
+ *
+ * 产出：treeCells / treePosOf / treeEdges / treeLanes / treeMaxDepth / treeTotalW。 */
 function treeLayout() {
   ensureBranch();
-  treeCells = []; treeLanes = 1; treeMaxDepth = 0;
+  treeCells = []; treeEdges = new Map(); treeLanes = 1; treeMaxDepth = 0;
   treePosOf = new Map();
 
-  /* ★★ 2026-10-14 第二次重写（首相看过放大窗之后又指出两条）：
-   *   「最后几手展开那么靠上，越靠前的分支越在最下面，这不合理吧」
-   *   「每个分支都单起一行太浪费 —— 明明有些是两头碰不到的」
-   *
-   * 【第一条为什么反了】上一版用**深度优先**分配行号：主变先整条走完（一步不占新行），
-   *   然后回溯时**最先回溯到的（也就是最深的）分叉先拿到小行号** →
-   *   于是"175 的分支在最下、182 的分支在最上"，正好跟直觉相反。
-   *   现在改成**按分叉手数（depth0）从浅到深分配** —— 靠前的分叉先拿靠上的行。
-   *
-   * 【第二条怎么省】行可以**复用**，但必须同时满足两条（否则又会交叉）：
-   *   ① 这一行上，从**父珠所在列**到本支末端的整段都是空的
-   *      （水平连接段是从父列开始画的，所以要从父列算起，不能只算本支的列）；
-   *   ② **父珠所在列**上，从父的行到本行的每一格都没有珠子（下落线不被挡）。
-   *   两条都过才共用 —— 这样"不交叉"仍然成立，但行数能显著降下来。
-   *
-   * ⚠️ 分配顺序保证"父必先于子"：`depth0` 浅的一定排在前面，所以轮到某条支时，
-   *    它父节点的行号**已经定好了**（`rowOf(parent)`）。
-   * ⚠️ 折叠只影响"画不画"，不影响别的支的分配。 */
+  /* ---------- ① 当前显示那一手 → 哪些节点的侧支必须展开 ----------
+     ★ 首相要"默认收起"，但**当前手所在的路径不能不画** ——
+       否则他点某条支的第 5 手，那颗珠子根本不在树上，看着像"点了没反应"。
+     ⚠️ 只标"侧支的**父节点**"，不是把整条祖先链都展开（否则又变回"太乱了"）。 */
+  treeForceOpen = new Set();
+  {
+    let n = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
+    while (n && n._p) {
+      const pcs = n._p._cs || [];
+      if (pcs.length > 1 && pcs[0] !== n) treeForceOpen.add(n._p);   // n 是侧支 → 父必须展开
+      n = n._p;
+    }
+  }
 
-  const occ = [];                                   // occ[r] = 该行已占用的列集合
-  const occOf = r => (occ[r] || (occ[r] = new Set()));
-  const colFree = (r, d) => !occOf(r).has(d);
-  const rangeFree = (r, d0, d1) => {
-    for (let d = d0; d <= d1; d++) if (!colFree(r, d)) return false;
-    return true;
-  };
+  /* 行索引（判"格子占没占"、查"这一行有哪些珠子"）——别每次全量扫 treeCells */
+  const rowOcc = new Map();                       // row → Set<depth>
+  const rowCell = new Map();                      // row → [cell…]
+  const occOf = r => { let s = rowOcc.get(r); if (!s) { s = new Set(); rowOcc.set(r, s); } return s; };
+  const cellOf = r => { let a = rowCell.get(r); if (!a) { a = []; rowCell.set(r, a); } return a; };
+
+  /* 跨行的**斜线**：只存**节点对**，坐标每次都从 treePosOf 现算。
+     现在行号一旦定下就不再变动（`insertRowAt` 已废），本来可以存死坐标；
+     但现算也就几次乘法，而且**不会因为将来再改动行号而悄悄失效** —— 留着更安全。 */
+  const edgeList = [];
+  const edgeOf = () => edgeList;
+
   const put = (node, depth, row) => {
-    treeCells.push({ node, depth, row });
-    treePosOf.set(node, { d: depth, r: row });
+    const c = { node, depth, row };
+    treeCells.push(c);
+    cellOf(row).push(c);
     occOf(row).add(depth);
+    treePosOf.set(node, { d: depth, r: row, n: node });   // n = 自引用，斜线要按它现算坐标
     if (row + 1 > treeLanes) treeLanes = row + 1;
     if (depth > treeMaxDepth) treeMaxDepth = depth;
   };
 
-  /* 子树「会画出来的列跨度」（折叠掉的侧支不算）—— 判复用时要按这个算占用区间 */
-  const spanOf = n => {
-    if (treeCollapsed.has(n)) return 1;
-    let best = 1;
-    for (const c of (n._cs || [])) { const s = 1 + spanOf(c); if (s > best) best = s; }
-    return best;
+  /* 珠心坐标（画线与判碰同一套口径 —— 2026-10-13 踩过"两处各算一套、对不齐"） */
+  const cx = d => stoneX(d) + STP / 2;
+  const cy = r => stoneCy(r);
+  /* ★ 判碰半径比断言里的 `STP/2 - 1` 再严 0.5px：宁可多占一行，也不让 A1 出现"擦边" */
+  const R_HIT = STP / 2 - 0.5;
+  const NEAR = 1;                                  // 端点排除容差（同一颗珠子不能算自己挡路）
+  const segHit = (px, py, x1, y1, x2, y2) => {
+    if (Math.hypot(px - x1, py - y1) < NEAR || Math.hypot(px - x2, py - y2) < NEAR) return false;
+    const dx = x2 - x1, dy = y2 - y1;
+    const L2 = dx * dx + dy * dy;
+    let t = L2 ? ((px - x1) * dx + (py - y1) * dy) / L2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy)) < R_HIT;
   };
 
-  /* ---------- ① 主变：占第 0 行，沿 _cs[0] 一路往右 ---------- */
-  let cur = branchRoot, d = 0;
-  while (cur && cur._cs && cur._cs.length) {
-    cur = cur._cs[0];
-    d += 1;
-    put(cur, d, 0);
-  }
-  /* ⚠️ 虚拟根（branchRoot）**不入格、不占列** —— 它只是"所有支的共同起点"。
-     曾被写成"put 之后再 pop/delete"，那样列 0 会被它白占一格，第 1 手的连线也少一段。 */
+  /* 一条支（br.ds = 它主链每一节的深度）摆在第 row 行，放得下吗？
+     ★ 三条判据，每一条都能被断言直接验：
+       ① 这一行的这些格子必须都空着；
+       ② 这一支的**入线**（父珠心 → 支首珠心）不碰任何已放置的珠子；
+       ③ 已放置的**斜线**不碰这一支的珠子。
+     ⚠️ 判据再保守，最坏结果也只是"多占一行"，**不可能卡死**（`findRow` 一路找到行尾就停）。 */
+  const branchFits = (br, pPos, row) => {
+    const ds = br.ds;
+    /* ① 格子不重叠 */
+    const used = occOf(row);
+    for (let i = 0; i < ds.length; i++) if (used.has(ds[i])) return false;
+    /* ② 入线不碰珠子 —— 只扫这条线**经过的那几行**（两端行号之间） */
+    const x1 = cx(pPos.d), y1 = cy(pPos.r), x2 = cx(br.depth0), y2 = cy(row);
+    const r0 = Math.min(pPos.r, row), r1 = Math.max(pPos.r, row);
+    for (let r = r0; r <= r1; r++) {
+      const rowCells = cellOf(r);
+      for (let i = 0; i < rowCells.length; i++) {
+        const x = rowCells[i];
+        if (segHit(cx(x.depth), cy(x.row), x1, y1, x2, y2)) return false;
+      }
+    }
+    /* ③ 已有的斜线不碰这一支的珠子。
+          ⚠️ 先用 y 范围粗筛（斜线不在这一行的高度上就直接跳过），再做精确距离 —— 性能关键 */
+    const y = cy(row);
+    for (let i = 0; i < edgeList.length; i++) {
+      const e = edgeList[i];
+      const pp = treePosOf.get(e.p), cc = treePosOf.get(e.c);
+      if (!pp || !cc) continue;
+      const ey1 = cy(pp.r), ey2 = cy(cc.r);
+      if (y < (ey1 < ey2 ? ey1 : ey2) - R_HIT || y > (ey1 > ey2 ? ey1 : ey2) + R_HIT) continue;
+      const ex1 = cx(pp.d), ex2 = cx(cc.d);
+      for (let k = 0; k < ds.length; k++) if (segHit(cx(ds[k]), y, ex1, ey1, ex2, ey2)) return false;
+    }
+    return true;
+  };
 
-  /* ---------- ② 收集所有"侧支"，按分叉手数从浅到深排序 ---------- */
-  let nextRow = 0;                                  // 主变占了行 0，侧支从 1 开始
-  const branches = [];
+  /* 找行：**从 startRow 开始**一路找到行尾，取第一个"几何上放得下"的行
+     （`branchFits` 那三条判据：格子不重叠 / 入线不碰珠子 / 已有的斜线不碰这一支的珠子）；
+     一路都没有空位，就用在**末尾新开一行**（`treeLanes`）。
+
+     ★★★★ 2026-10-14 深夜定稿：**"硬塞行尾"这条兜底废弃** —— 查清了，它就是首相报的
+       "线贴在珠子上"的真凶。诊断实测（真实棋谱，一轮布局放 14 条支）：
+         · 兜底触发 **3 次**，每一次都发生在**"只试了 1 行"**之后 ——
+           因为 `nextFree` 把起始行推到了行尾，循环里根本没有第二行可试；
+         · 这 3 次的入线到最近珠心距离 = **11.1 / 6.7 / 5.6px**（判碰半径 11.5、珠半径 12），
+           后两个与首相报的过近明细**逐位吻合**。
+       ⇒ 兜底不再"明知穿珠还放"，改成**降级**：先挑完全合规的行；都找不到，才退而挑
+         **格子不冲突里最靠上的一行**（起始行优先 → 跨行数最小 → 擦得最轻）。
+       ⚠️ 降级仍是"带着轻微擦边放行"，不是彻底治好 —— 彻底治好要靠列距，见下面的铁律。
+
+     ★ 几何铁律（决定"一个父最多能同时展开几条支"，**改列距/行距前必看**）：
+         同一父第 k 条支的入线，到"紧邻上一个兄弟"珠心的距离 = `A·H / √(A² + k²H²)`
+         （A = TREE_W 列距，H = TREE_H 行距）。当前 A=34、H=52：
+           k=1 → 28.5px ✓    k=2 → 16.2px ✓    **k=3 → 11.07px ✗**（判碰线 11.5）
+           k=5 → 6.74px ✗（实测 6.7）         k=6 → 5.64px ✗（实测 5.6）
+         ⇒ **当前只有 k ≤ 2 安全**。要撑到 k=3 需 A ≥ 35.4，k=4 需 A ≥ 47.2，k=5 需 A ≥ 59。
+         ⚠️ 加大**行距 H 救不了**（距离上界是 A/k，H 越大反而越贴近这个上界）——
+            所以要治，只能动列距 A。
+
+     ★★ 2026-10-15 定稿：**"插入让位"整条路废弃了**，这是实测几次打出来的结论 ——
+       插入 = 把 `row >= r` 的全部下移一行。于是"**父在 r 上方、子在 r 下方**"的那些斜线
+       **父端不动、子端下移** → 线被拉长 → 拉到后来**穿过中间行上的珠子**：
+         · 带插入（无保护）：真实棋谱全展开 **10209 处**线与珠子过近；
+         · 加了"只在不会拉长任何线时才插"的保护：降到 140 处 —— 但**按需展开 8 条支时仍有 2 处**、
+           展开到 28 条时 91 处（插入把兄弟支的行号推得不连续，见下）；
+         · 彻底不插（本版）：由"兄弟行号连续"接管，零接触才真正成立。
+       "后展开的挤上去"**不需要**插入来实现 —— 靠**排序方向**就够了（倒序：后展开的先放，
+       直接占住最靠上的空行），完全不用动任何已经放好的东西。
+     ⚠️ 也不再设"搜索行数上限"：那 5.2 秒只发生在「全部展开」那一刻，
+        而那个按钮已按首相要求删除 —— 为一个不存在的场景加限制，反而把支逼向更坏的选择
+        （实测加上限后过近从 140 处涨到 5353 处）。 */
+  const rowFreeOnly = (br, row) => {                 // 只要格子不冲突（降级用）
+    const used = occOf(row);
+    for (let i = 0; i < br.ds.length; i++) if (used.has(br.ds[i])) return false;
+    return true;
+  };
+  const findRow = (br, pPos, startRow) => {
+    const from = Math.max(pPos.r + 1, startRow);
+    for (let r = from; r <= treeLanes; r++) if (branchFits(br, pPos, r)) return r;
+    for (let r = from; r <= treeLanes; r++) if (rowFreeOnly(br, r)) return r;   // 降级：最靠上的空行
+    return treeLanes;
+  };
+
+  /* 把一条支的主链整条铺在 row 上。
+     ★ 只有**第一条链节**是斜的（父在别的行）→ 登记进 edgeList；
+       其余都是同一行的水平短线，不可能碰到别的行的珠子，**不必登记**。 */
+  const placeChain = (br, pPos, row) => {
+    let n = br.head;
+    for (let k = 0; k < br.ds.length; k++) {
+      const d = br.ds[k];
+      put(n, d, row);
+      if (k === 0) edgeList.push({ p: pPos.n, c: n });
+      n = (n._cs && n._cs[0]) || null;
+      if (!n) break;
+    }
+  };
+
+  /* ---------- ② 主变：占第 0 行，沿 _cs[0] 一路往右 ----------
+     ⚠️ 虚拟根（branchRoot）**不入格、不占列** —— 它只是"所有支的共同起点"。
+        曾被写成"put 之后再 pop/delete"，那样列 0 会被它白占一格、第 1 手的连线也少一段。 */
+  {
+    let n = branchRoot, d = 0;
+    for (;;) {
+      const cs = n._cs || [];
+      if (!cs.length) break;
+      n = cs[0]; d += 1;
+      put(n, d, 0);
+    }
+  }
+
+  /* ---------- ③ 收集所有"要画的支"（链深度列表只算一次），按展开时间倒序逐个放 ---------- */
+  const all = [];
+  const chainDepths = (head, depth0) => {
+    const ds = [];
+    let n = head, d = depth0;
+    for (;;) { ds.push(d); if (!n._cs || !n._cs.length) break; n = n._cs[0]; d += 1; }
+    return ds;
+  };
   (function collect(node, depth) {
     const cs = node._cs || [];
     if (!cs.length) return;
-    if (treeCollapsed.has(node)) { collect(cs[0], depth + 1); return; }   // 折起：侧支不画，主变照走
-    for (let i = 1; i < cs.length; i++) {
-      branches.push({ head: cs[i], parent: node, depth0: depth + 1, span: spanOf(cs[i]) });
-      collect(cs[i], depth + 1);
+    if (treeIsOpen(node)) {
+      for (let i = 1; i < cs.length; i++) {
+        all.push({ head: cs[i], parent: node, depth0: depth + 1, ds: chainDepths(cs[i], depth + 1) });
+      }
     }
-    collect(cs[0], depth + 1);
+    for (const c of cs) collect(c, depth + 1);
   })(branchRoot, 0);
-  /* ★ 稳定排序按分叉手数 —— 这就是"越靠前的分支越靠上" */
-  branches.sort((a, b) => a.depth0 - b.depth0);
 
-  /* ---------- ③ 依次分配行 ----------
-   * ★★ 2026-10-14 定稿：**每条侧支各占一个新行**（行号全局递增），**不做"复用行"**。
-   *
-   * 【为什么放弃复用】试过 —— 复用要同时满足两条约束（① 水平段从父列到本支末端整段要空；
-   *   ② 父列上从父行到本行每一格要空）。这套判据**很难写对**，而一旦有偏差，
-   *   就退化成"永远找不到满足条件的行" → 循环一路撞到兜底上界（实测分到了**第 67 行**），
-   *   比"多占几行"糟得多。更早那版还因为约束②把父珠自己算作挡路，直接**死循环**把渲染进程卡死。
-   *   **宁可多占行，也不要一个能把自己卡死的判据。**
-   *
-   * 【顺序这一条是首相真正在意的，已修正】上一版用**深度优先**分配：
-   *   最先回溯到的（也就是最深的）分叉先拿到小行号 → 「175 的分支在最下、182 的在上」，正好反过来。
-   *   现在 `branches` 已按 `depth0`（分叉手数）**从浅到深**排好，所以**靠前的分叉拿靠上的行** ——
-   *   这就是首相要的顺序。
-   *
-   * 【"不交叉"仍然成立】每条支独占一行 → 任何一条下落线的两侧永远是空行 ——
-   *   `_inject_tree1014.js` 的 T1 就是照这个判的（"下落线段上没有别的珠子"）。
-   *
-   * ⚠️ 若将来真要省行，请**先给"复用判据"写出单测**（构造几棵重叠/不重叠的树断言行号），
-   *    再放进 `treeLayout` —— 别再凭推理直接改这段。 */
-  for (const br of branches) {
-    const pp = treePosOf.get(br.parent);
-    if (!pp) continue;                              // 父没被画出来（理论上不会）
-    nextRow += 1;
-    const r = nextRow;
-    /* ★★ 2026-10-14 定稿：**不做任何"找行/避让"**，每条支直接拿下一个行号。
-     *
-     * 【为什么把避让也删了】这一轮试了两次"聪明的找行"，两次都不靠谱：
-     *   · 第一次（复用行 + 无上界循环）：约束把父珠自己当成挡路 → **死循环** →
-     *     渲染进程整个卡死、页面全白（首相报的"啥都没渲染"就是它）；
-     *   · 第二次（独占行 + 下落线避让 + 上界兜底）：判据仍然恒不满足 →
-     *     一路撞到兜底 → 第二条支分到了**第 514 行**（树高成那样，比不避让糟得多）。
-     *   两次的教训是同一条：**这类"找第一个满足条件的行"的判据，写错的代价远大于收益**。
-     *   所以定稿成最简单的形态 —— **序号即行号**。它显然收敛、显然不重叠、显然能预测。
-     *
-     * 【代价，说清楚】下落线是垂直画的，偶尔会从**别的行某个珠子上**穿过（视觉小瑕疵）。
-     *   要根治应该把连线改成**斜线**（圆心到圆心，就不会压在格子上），
-     *   那是 `treePaint` 的事，跟布局无关 —— 留作后续改进，别再动这个函数。
-     *
-     * 【首相在意的顺序，已修正】`branches` 按 `depth0` 从浅到深排过 → 靠前的分叉拿靠上的行。 */
-    /* 把这条支的**主链**摆上去（它自己的子支由外层 branches 循环处理） */
-    let n = br.head, dd = br.depth0;
-    put(n, dd, r);
-    while (n && n._cs && n._cs.length) {
-      n = n._cs[0];
-      dd += 1;
-      put(n, dd, r);
+  /* ★★★★ 排序方向：**倒序**（后展开的先放）—— 这一条我改错过一次，记下来别再翻：
+     · **倒序（后展开的先放）**：最后展开的那条先占最靠上的空行 → 它永远在最上面；
+       先展开的后放，只能捡下面的空位 ⇒ 正是首相要的"先展开的被后展开的挤下去"。
+     · 正序（先展开的先放）**只有配合"插入让位"才成立**；一旦去掉插入（为了保零接触），
+       正序就变成"先来先占、后来的往下排"，**正好反了** —— 实测 T12 直接挂。
+     ⚠️ 同一序号（都是自动展开的）保持收集顺序 = 手数顺序：靠前的分叉先放、拿靠上的行。
+     ⚠️ 父必须先于子放置（子支要从"父行 + 1"起算），所以**分轮**放：
+        这一轮父还没落地的先跳过，下一轮再来。最多 20 轮；**一轮没进展就收工**，绝不死循环。 */
+  all.sort((a, b) => expandSeqOf(b.parent) - expandSeqOf(a.parent));
+
+  /* ★★★★ 同一父的侧支：行号必须**连续**（一个挨一个往下排，中间不留空行）。
+     为什么这条是硬的：同一个父下面的几条支，**第 1 颗珠子在同一列上**（都是父的下一手）。
+     只要某个兄弟的行号落在另外两个兄弟**中间**，外面那条的入线就会从它旁边擦过去 ——
+     实测明细：
+        线 第4手(行0)→第5手(行5) 跨 5 行，碰到同在第 5 手、行 4 的那颗，距离只有 **6.7px**（珠半径 12）
+        线 第4手(行0)→第5手(行6) 跨 6 行，碰到同在第 5 手、行 5 的那颗，距离只有 **5.6px**
+     行号连续之后，每条入线只跨 1 行，**必然不碰**。
+     ⚠️ `nextFree` 要**跨轮保留**（同一父的支可能分在不同的轮里落地）。 */
+  const nextFree = new Map();                        // 父 → 下一个兄弟该用的最小行号
+  let rest = all;
+  for (let pass = 0; pass < 20 && rest.length; pass++) {
+    const next = [];
+    for (const b of rest) {
+      const pPos = treePosOf.get(b.parent);
+      if (!pPos) { next.push(b); continue; }        // 父还没被画出来 → 等下一轮
+      const nf = nextFree.get(b.parent);
+      const r = findRow(b, pPos, nf === undefined ? pPos.r + 1 : nf);
+      nextFree.set(b.parent, r + 1);                 // 下一个兄弟至少从 r+1 起
+      placeChain(b, pPos, r);
     }
+    if (next.length === rest.length) break;          // 没有进展 → 收工
+    rest = next;
   }
 
   /* ★ 左右各留一点边（首相 2026-10-14：左上那颗珠子原来零距离贴边，
@@ -1331,6 +1476,24 @@ function treePaint() {
   const mainSet = new Set();
   for (let cur = branchRoot._cs && branchRoot._cs[0]; cur; cur = cur._cs && cur._cs[0]) mainSet.add(cur);
 
+  /* ★★★ 2026-10-15 首相要求（原话）：「选中某条分支中某一手时，一直到这手，其灰色线都要
+     高亮为绿色线……其自身往上追溯到主干的第一手，其自身还有叔叔伯伯，那边的就不亮；
+     其下面往后的手也不亮，只高亮到此手。还有，高亮绿线，**不是**高亮沿途的棋子外圈，
+     只有选中手才高亮外圈，沿途只亮绿线（就是珍珠串的线）即可。」
+     ▸ 做法：把「当前显示的那一手 → 一路沿 `_p` 上溯到主干第一手」这条**直系链**上的节点
+       收进 hotSet；画线时按"**边的下端（子节点）**在不在 hotSet 里"决定加不加 `ln-hot`。
+     ▸ 三个"不亮"天然成立，不需要另写判据：
+        · 叔叔伯伯那条支的节点根本不在链上 → 不亮；
+        · 选中手**下面**的手也不在链上 → 不亮；
+        · 沿途只给**线**加类，珠子一个都不动 —— 外圈只有 `.cap.cur` 那一颗，正是选中的那手。
+     ⚠️ 起点取 `state.moves[state.viewAt - 1]`（**当前正在看的那一手**），不是末手 ——
+        回看时高亮要跟着"正在看的那一手"走。 */
+  const hotSet = new Set();
+  {
+    let n = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
+    while (n && !n._virtual) { hotSet.add(n); n = n._p; }
+  }
+
   let html = '';
   /* ① 连线先画（珠子后画、压在它上面 —— 线从**珠心穿到珠心**，两端被珠子盖住，
      看上去就是手串的绳把珠子一颗颗穿起来，首相 2026-10-13 看图二定的口径）。
@@ -1348,12 +1511,24 @@ function treePaint() {
     const x0 = cx(pp.d), x1 = cx(c.depth), cy = stoneCy(c.row);
     if (pp.r === c.row) {
       /* 同一条航道：父珠心 → 本珠心。主变那段带金色调，呼应金圈。 */
-      html += `<div class="ln ${mainSet.has(m) ? 'ln-main' : ''}" style="left:${x0}px;top:${cy - 1}px;width:${x1 - x0}px"></div>`;
+      html += `<div class="ln ${mainSet.has(m) ? 'ln-main' : ''}${hotSet.has(m) ? ' ln-hot' : ''}" style="left:${x0}px;top:${cy - 1}px;width:${x1 - x0}px"></div>`;
     } else {
-      /* 侧支起头：竖线从父珠心落到本行中线，再水平接进本珠心。 */
+      /* ★★★ 2026-10-14 晚（首相硬要求：「**没有关系的手一定不要碰到**，一旦碰到就搞不清楚哪是哪」）：
+       * 侧支这条线**改成斜线**（父珠心 → 子珠心，一笔连过去）。
+       *
+       * 【为什么不能再用"先垂直下落、再水平接入"】在"每支独占一行"的布局里，
+       *   同一列会被**多条支**经过（不同支在同一深度各有一个节点）。所以垂直下落线
+       *   **必然**从那些珠子上穿过去 —— 这不是判据能修的：实测把行号从 2 一直避到 14，
+       *   照样躲不开（列上那些珠子是别的支的，躲到哪一行都在那条列上）。
+       *   斜线则走的是**两颗珠子之间的斜向空白**，不沿任何整列走 —— 这才是"碰不到"的解法。
+       * ⚠️ 用 transform 旋转一条 div 来画（不引 SVG，改动最小）；
+       *   `transform-origin:0 0` 让它绕自己的左端转，长度按两点距离算。 */
       const py = stoneCy(pp.r);
-      html += `<div class="ln ln-br" style="left:${x0 - 1}px;top:${py}px;width:2px;height:${cy - py}px"></div>`;
-      html += `<div class="ln ln-br" style="left:${x0}px;top:${cy - 1}px;width:${Math.max(1, x1 - x0)}px"></div>`;
+      const dx = x1 - x0, dy = cy - py;
+      const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const ang = Math.atan2(dy, dx) * 180 / Math.PI;
+      html += `<div class="ln ln-br${hotSet.has(m) ? ' ln-hot' : ''}" style="left:${x0}px;top:${py - 1}px;width:${len}px;`
+        + `transform:rotate(${ang.toFixed(2)}deg);transform-origin:0 0"></div>`;
     }
   }
   /* ② 珠子：手数印在珠心、用**相反色**（黑子白字 / 白子黑字，首相定的画法）。
@@ -1362,9 +1537,12 @@ function treePaint() {
     if (c.depth < d0 || c.depth > d1) continue;
     const m = c.node;
     const cs = m._cs || [];
-    const folded = treeCollapsed.has(m);
+    /* ★ 2026-10-14 深夜：默认收起 → 角标**默认就是「+n」**（有 n 条侧支，点开），
+       展开之后才变「▾」。所以 `folded` 现在是**常态**，不再是异常态。 */
+    const open = treeIsOpen(m);
+    const folded = cs.length > 1 && !open;
     const fold = cs.length > 1
-      ? `<i class="tf" data-fold="1" title="${folded ? '展开侧支（' + (cs.length - 1) + ' 条）' : '折叠侧支（' + (cs.length - 1) + ' 条）'}">${folded ? '+' + (cs.length - 1) : '▾'}</i>`
+      ? `<i class="tf" data-fold="1" title="${folded ? '展开侧支（' + (cs.length - 1) + ' 条）' : '收起侧支（' + (cs.length - 1) + ' 条）'}">${folded ? '+' + (cs.length - 1) : '▾'}</i>`
       : '';
     html += `<div class="cap s${m.color} ${m === curNode ? 'cur' : ''} ${mainSet.has(m) ? 'main' : ''} ${folded ? 'folded' : ''}"`
       + ` data-d="${c.depth}" data-r="${c.row}" style="left:${stoneX(c.depth)}px;top:${TREE_PAD_Y + 4 + c.row * TREE_H}px">`
@@ -1399,7 +1577,18 @@ function renderMoveTree() {
   /* 当前手在不在树上（折叠可能正好把它折掉 → cell 为 undefined，那就更不该乱滚） */
   const curNode = state.viewAt > 0 ? state.moves[state.viewAt - 1] : null;
   const cell = curNode && treeCells.find(c => c.node === curNode);
-  const sig = box.clientWidth + '|' + (state.recName || '') + '|' + state.viewAt + '|' + (cell ? cell.row : -1);
+  /* ★★ 2026-10-14 深夜修（首相：「有时候点个收起或者展开会直接**视野跳到最后**」）：
+     sig 原来**带 `cell.row`**（当前手所在的行号）—— 而"展开/收起"必然改变行号
+     （行分配是整体重算的，新算法还会"插入一行让位"，行号动得更厉害），
+     于是每点一次角标：sig 变 → `shouldFollow` 为真 → **主动把当前手滚进视野**。
+     用户明明在看别处，视野"啪"地跳到当前手那一片 —— 他描述的就是这个。
+     **行号变了不代表用户想换视野**，它只是布局重算的副作用。
+     所以 sig 里只留三个"真的该重新定位"的信号：
+       · `clientWidth` —— 开关放大窗（宽度大变，"看得见哪一段"完全不同）
+       · `recName`     —— 换棋谱
+       · `viewAt`      —— 当前手真的换了
+     ⚠️ 护栏断言：`_inject_tree1014.js` 的 S1。 */
+  const sig = box.clientWidth + '|' + (state.recName || '') + '|' + state.viewAt;
   const shouldFollow = (sig !== treeScrollSig) && box.clientWidth > 0;
   treeScrollSig = sig;
 
@@ -1479,14 +1668,56 @@ function gotoNode(node) {
     steps.unshift({ at: nodeDepth(p), j: p._cs.indexOf(cur) });
     cur = p;
   }
-  for (const s of steps) if (!switchBranch(s.at, s.j)) return;
+  /* ★★ 2026-10-14 深夜修一个既有 bug（写新断言的测试脚本时踩出来的）：
+     原来这一行是 `for (const s of steps) if (!switchBranch(s.at, s.j)) return;` ——
+     而 `steps` 里会包含**只有一条分支的点**（那种点 `switchBranch` 会拒绝并 flash
+     「这一点还没有分支」，见内核里 `if (sib.length < 2) return false`）。
+     后果很难查：**路径已经切了一半、`gotoView(depth)` 却没执行**，状态停在中间，
+     接着落子就挂到了错误的父节点上（实测：主线莫名其妙多出一手，支线凭空消失）。
+     现在：单分支的点**直接跳过** —— 父节点定下来之后，`pathThrough` 会沿 `_cs[0]`
+     把整条路铺到底，本来就不需要在那种点上切。 */
+  for (const s of steps) {
+    const par = branchParentAt(s.at);
+    const sib = (par && par._cs) || [];
+    if (sib.length < 2) continue;                  // 单分支点切不了，也不需要切
+    if (!switchBranch(s.at, s.j)) return;
+  }
   gotoView(depth);
 }
 
 /* C 键 / ▾ 角标：折叠「当前这一手」的侧支（主变那条永远画，折的是 _cs[1..]） */
-function toggleTreeCollapse(node) {
-  if (!node || !(node._cs && node._cs.length > 1)) { flash('这一手之后没有侧支，没得折叠'); return; }
-  if (treeCollapsed.has(node)) treeCollapsed.delete(node); else treeCollapsed.add(node);
+function toggleTreeExpand(node) {
+  if (!node || !(node._cs && node._cs.length > 1)) { flash('这一手之后没有侧支，没得展开'); return; }
+  /* ★ 默认收起：第一次点 = 展开（进集合），再点 = 收起（出集合）。
+     ⚠️ 当前手正走在这条支上的节点**收不起来**（treeLayout 的 forceOpen 会把它顶回来）——
+        与其点了没反应，不如直说。 */
+  if (treeExpanded.has(node)) {
+    if (treeForceOpen.has(node)) { flash('当前手走在这条支上，先跳到别处再收起'); return; }
+    treeExpanded.delete(node);
+    treeExpandSeq.delete(node);
+  } else {
+    treeExpanded.add(node);
+    treeExpandSeq.set(node, ++treeExpandCounter);   // ★ 记下"什么时候展开的" → 后展开的先挑行
+  }
+  renderMoveTree();
+}
+
+/* ★ 2026-10-14 深夜：放大窗里的「全部展开 / 全部收起」。
+   默认收起之后，"想一次看全、找分支"就得给个开关 —— 只动**展开集合**，
+   当前手那条路径由 treeLayout 每次重算（forceOpen），这里不用管。 */
+function treeExpandAll(on) {
+  treeExpanded.clear();
+  treeExpandSeq.clear();
+  if (on) {
+    /* ⚠️ 序号按**手数顺序**发（靠前的分叉序号小）→ 行分配倒着来 → 靠前的分叉排在下面。
+       这是"一次全展开"时唯一说得通的顺序：没有"最近展开"这回事，
+       所以让"最后发的那个序号"落在最后 —— 也就是最靠主干。 */
+    (function walk(n) {
+      const cs = n._cs || [];
+      if (cs.length > 1) { treeExpanded.add(n); treeExpandSeq.set(n, ++treeExpandCounter); }
+      for (const c of cs) walk(c);
+    })(branchRoot);
+  }
   renderMoveTree();
 }
 
@@ -1601,6 +1832,11 @@ function initBranchTree() {
      点遮罩空白处也收 —— 与项目里其它弹窗一致的习惯。 */
   if ($('btn-treezoom')) $('btn-treezoom').onclick = () => setTreeZoom(!treeZoomOn);
   if ($('btn-treezoom-close')) $('btn-treezoom-close').onclick = () => setTreeZoom(false);
+  /* ★ 2026-10-15 首相：**删掉「全部展开」**（"那个没有用"），只留「全部收起」（"那个有用"）。
+     全部展开在这个规模下本来也没意义 —— 真实棋谱 457 条支、两千多行，铺开也看不了。
+     ⚠️ `treeExpandAll(false)` 保留（全部收起要用）；`treeExpandAll(true)` 现在没有调用方，
+        函数留着（回退方便），但界面上不再暴露。 */
+  if ($('btn-tree-none')) $('btn-tree-none').onclick = () => treeExpandAll(false);
   if ($('treezoom')) {
     $('treezoom').addEventListener('click', e => { if (e.target === $('treezoom')) setTreeZoom(false); });
   }
@@ -1617,7 +1853,7 @@ function initBranchTree() {
     if (!cap) return;
     const cell = cellOfCap(cap);
     if (!cell) return;
-    if (e.target.closest('.tf')) { toggleTreeCollapse(cell.node); return; }
+    if (e.target.closest('.tf')) { toggleTreeExpand(cell.node); return; }
     gotoNode(cell.node);
   });
   /* ★ 右键 = 平移画布（首相 2026-10-13：按住右键往哪拖，画布就往哪移动，镜头不动）。
@@ -3045,7 +3281,7 @@ function applyRecord(rec, srcName) {
      （与 `rec.moves` 同一条线），其余分支挂在 `_cs` 上，于是打开棋谱就能 ↑/↓ 切。
      读不出树（老格式 / 畸形）时退回旧的扁平口径，行为与以前一致。 */
   branchRoot = { _p: null, _cs: [], _virtual: true, x: -1, y: -1, color: null };
-  treeCollapsed.clear();                 // 段③：换棋谱 = 全新一棵树，折叠集存的是旧节点引用，必须清
+  treeExpanded.clear(); treeForceOpen.clear(); treeExpandSeq.clear();   // 换棋谱 = 全新一棵树，展开集存的是旧节点引用，必须清
   branchTrash = null; pendingDel = null; // ★ 坑位 37 同源：换棋谱也要作废「上一棵树的」回收站与待删登记
   state.moves = [];
   if (rec.tree) sgfTreeToMoves(rec.tree, branchRoot, 0, state.moves, rec.size, { n: 0 });
@@ -4255,9 +4491,9 @@ function applyNewGame(idle) {
 
   state.moves = [];
   branchRoot = null;                     // ★ 新对局：分支树作废重建
-  treeCollapsed.clear();                 // 段③：折叠集里存的是节点引用，换局必须清（防泄漏+防误折）
+  treeExpanded.clear(); treeForceOpen.clear(); treeExpandSeq.clear();   // 同上：换局必须清（防泄漏 + 防误展）
   /* ★★ 坑位 37（2026-10-13 审查补）：回收站与「待确认删除」也是**节点引用**，
-     和 treeCollapsed 同一个性质 —— 漏清就是：删过分支（没撤销）→ 新开一局 →
+     和 treeExpanded 同一个性质 —— 漏清就是：删过分支（没撤销）→ 新开一局 →
      按 Ctrl+Shift+Z（或树面板右键「撤销刚才删除的分支」）→ undoDeleteBranch 把
      **旧局的整枝**沿旧祖先链拼成路径灌进 `state.moves`，新局棋盘直接变成旧局那条线。
      实测：`dev/_verify_fixes_1013.js` 断言 #1 复现（换局后按撤销 → 棋盘 0 手变 5 手）。 */
@@ -6565,13 +6801,13 @@ window.addEventListener('keydown', e => {
     /* ★ 提升主变（2026-10-13，设计方案段② 第 4 条 / 决策 8）：PgUp。
        把「当前看到的这一手」所在的那条支整个提为主变（原主变退成旁支，整枝不丢）。 */
     case 'PageUp':     e.preventDefault(); promoteToMainline(state.viewAt); break;
-    /* ★ 段③ 树面板（2026-10-13）：C 折叠/展开「当前这一手」的侧支（主变那条不折）。
+    /* ★ 段③ 树面板（2026-10-13）：C 展开/收起「当前这一手」的侧支（主变那条不动）。
        施工单的"回上一岔口 b 键"和现有「变化图（B）」撞车 —— 不改别人的键，
        也不自创键位：树面板点任意胶囊即可跳转，↑↓ 已覆盖换分支，b 暂不绑（已登记冲突）。 */
     case 'KeyC':
       if (movesView === 'tree' && state.viewAt > 0) {
         e.preventDefault();
-        toggleTreeCollapse(state.moves[state.viewAt - 1]);
+        toggleTreeExpand(state.moves[state.viewAt - 1]);
       }
       break;
     /* ★ 删除分支（2026-10-13，设计方案决策 7/8）：Delete 两段式 ——
