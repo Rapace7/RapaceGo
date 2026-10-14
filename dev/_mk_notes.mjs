@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 /* ★ 2026-10-07：脚本搬进 dev\ —— 路径按脚本自身位置算，不写死盘符。 */
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SRC = path.join(ROOT, '发布说明.md');
+/* ★ 2026-10-14 深夜：文档收进 docs/（根目录只留两个 README + 程序必需文件）——
+   原来根目录堆了 11 个 .md/.txt，而 GitHub 的 README 必然渲染在文件列表**下面**，
+   进来的人要往下拉很久才看到介绍。路径跟着改。 */
+const SRC = path.join(ROOT, 'docs', '发布说明.md');
 const OUT = path.join(ROOT, '_release_notes.md');
 
 const t = fs.readFileSync(SRC, 'utf8');

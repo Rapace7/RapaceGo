@@ -487,11 +487,27 @@ in long-running human–AI collaboration:
 
 The development conversations were powered by **DeepSeek V4.1 Flash**.
 
-The whole process is recorded in **[开发记录.md](开发记录.md)** (Chinese) — not a changelog,
+The whole process is recorded in **[开发记录.md](docs/开发记录.md)** (Chinese) — not a changelog,
 but a *decision log*: why each feature is the way it is, which approaches were rejected,
 what broke, and the measured numbers behind each choice.
 
-The `_*.mjs` / `_rtest.py` files in the repo root are the self-check suite:
+<details>
+<summary><b>Other docs in this repo (all under <code>docs/</code> — Chinese)</b></summary>
+
+| Doc | What's in it |
+|---|---|
+| [开发记录.md](docs/开发记录.md) | Decision log: why each feature is the way it is, what was rejected, what broke |
+| [交接与实况.md](docs/交接与实况.md) | Current state, verification evidence, numbered pitfall list |
+| [发布说明.md](docs/发布说明.md) | Per-version release notes (the GitHub Release body is extracted from it) |
+| [分支功能设计方案.md](docs/分支功能设计方案.md) | Move-branch tree: design and trade-offs |
+| [macOS版本方案.md](docs/macOS版本方案.md) | How to build the macOS package (GitHub Actions — can't be done on Windows) |
+| [懒人包使用说明.txt](docs/懒人包使用说明.txt) | The lazy-package readme (bundled into it) |
+| [懒人包多显卡版本规划.md](docs/懒人包多显卡版本规划.md) | Lazy-package dual-engine (CUDA / generic) plan |
+| [OGS对弈方案.md](docs/OGS对弈方案.md) · [OGS调研笔记.md](docs/OGS调研笔记.md) | Online play (OGS) research |
+
+</details>
+
+The `_*.mjs` / `_rtest.py` files under `dev/` are the self-check suite:
 static checks (DOM references, IPC contract, `[hidden]` collisions), end-to-end smoke tests,
 and cross-game race regression. They run in seconds after every change.
 

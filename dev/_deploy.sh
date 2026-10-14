@@ -249,7 +249,7 @@ TAG="v${VER}"
 #   通用下载/更新/硬件说明接在后面。
 # ★ 为什么用临时文件而不是 --notes：--notes 传多行会被 shell 拆坏；
 #   而反引号在双引号里会被当命令执行（实测把 `zz` 那行吞了，还只打一行 stderr）。
-NOTES_COMMON="发布说明.md"
+NOTES_COMMON="docs/发布说明.md"
 NOTES_TMP="$(mktemp)"
 trap 'rm -f "$NOTES_TMP"' EXIT
 if [ -n "${1:-}" ]; then
