@@ -341,6 +341,22 @@ function readConfig() {
   }
 }
 
+/* ★★ 2026-10-15（审查补 · 坑位 46）：**凡是往 settings.json 写盘，一律先过这一道**。
+   为什么：`settings:save` 花了十几行做「解析结果不进配置文件」的保护（懒人包挪到哪都能用），
+   而另外两处也写同一个文件的路**没走这道关** —— 点一次「检查更新」、或改一次棋谱库文件夹，
+   就把本机的绝对路径写进了 settings.json：文件夹一挪走，`readConfig` 反而会回退到那条
+   **失效的旧路径**（留了旧拷贝时更糟）——用户跑着旧引擎/旧权重而不自知。
+   判据与 settings:save 一致：**等于默认 → 就等于「没有自定义」→ 不写**。 */
+function configForDisk(src) {
+  const d0 = defaultPaths();
+  const out = Object.assign({}, src);
+  const winPath = p => { try { return path.resolve(p).toLowerCase(); } catch (e) { return ''; } };
+  for (const k of ['katago', 'analyzeWeight', 'playWeight', 'coachServer', 'coachWeight']) {
+    if (out[k] && d0[k] && winPath(out[k]) === winPath(d0[k])) out[k] = '';
+  }
+  return out;
+}
+
 function writeConfig(c) {
   try {
     fs.writeFileSync(CFG_FILE, JSON.stringify(c, null, 2), 'utf8');
@@ -521,6 +537,10 @@ function setStatus() {
 /* ---------- 启停 ---------- */
 function launch(e) {
   if (e.proc) return;
+  /* ★ 2026-10-15（审查补）：**正在退出就不要再拉起新进程**。
+     restartEngines 排的启动定时器原本不留句柄，用户在这 1~2 秒里点「卸载」或关窗口，
+     定时器到点仍会 spawn 一个新引擎 —— 关不干净。这里再兜一道（句柄那边也补了）。 */
+  if (quitting) return;
   e.lastErr = null;
   e.paused = false;                // 重新拉起 = 取消暂停
   /* ★ 清掉上一次的探针状态（2026-10-06）：不然重试的「总时限」会沿用上次的起点，
@@ -614,7 +634,11 @@ function launch(e) {
       rec.resolve({ error: '引擎已退出', cancelled: true });
     }
     e.pending.clear();
-    if (code !== 0 && code !== null) e.lastErr = '引擎意外退出（code ' + code + '）';
+    /* ★★ 2026-10-15（审查补 · 同一族「多个出入口只改了两处」）：**别覆盖已经说清楚的原因**。
+       典型：权重与引擎代际不匹配时，引擎先打一句原话（上一段刚存进 lastErr）再 code=1 退出。
+       原来这里无条件改成「引擎意外退出（code 1）」，用户永远看不到真原因 ——
+       那个「权重代际提示」功能等于白做。lastErr 在 launch() 开头必清空，所以判空即可。 */
+    if (code !== 0 && code !== null && !e.lastErr) e.lastErr = '引擎意外退出（code ' + code + '）';
     setStatus();
 
     /* ★ 手动重启（在设置里改完路径）时别走下面那段「意外退出自动重启」——
@@ -830,7 +854,12 @@ function restartEngines() {
   const go = () => {
     left -= 1;
     if (left !== 0) return;
-    wasUp.forEach((k, i) => setTimeout(() => launch(ENGINES[k]), 100 + i * 1200));
+    /* ★ 2026-10-15（审查补）：启动定时器**留句柄** —— 退出 / 卸载时得能取消它，
+       否则「卸载完过一秒它自己又起来了」（同类问题在 :631 的自动重启上修过一次）。 */
+    wasUp.forEach((k, i) => {
+      const en = ENGINES[k];
+      en.relaunchTimer = setTimeout(() => { en.relaunchTimer = null; launch(en); }, 100 + i * 1200);
+    });
   };
   for (const k of ENGINE_KEYS) stopEngine(ENGINES[k], go);
 }
@@ -1184,9 +1213,13 @@ function analyze(e, req) {
       const rec = e.pending.get(id);
       if (rec && !rec.done) {
         rec.done = true; e.pending.delete(id);
+        /* ★★ 2026-10-15（审查补）：超时交回的**中途快照必须带 cancelled 标记**。
+           rec.best 是搜索到一半的（visits 很少、胜率还没收敛），前端只挡 cancelled / error，
+           不带标记就会被当成正式结果画到盘上（胜率条突变、候选点错乱）**而且不报错**。
+           cancel 那条路早就带了（见 cancel()），这里是漏的。 */
         resolve(rec.collect
           ? { turns: rec.turns, incomplete: true }        // 复盘超时：把已收到的交出去
-          : (rec.best || { error: '分析超时' }));
+          : (rec.best ? Object.assign({}, rec.best, { cancelled: true }) : { error: '分析超时' }));
       }
     }, budget);
 
@@ -1399,9 +1432,14 @@ function coachPath(name) {
    棋谱文件都很小（几 KB），直接整读；取不到就返回空串。 */
 function readNote(file) {
   try {
-    const text = fs.readFileSync(file, 'utf8');
-    const m = /GN\[([^\]]*)\]/.exec(text);
-    return m ? m[1] : '';
+    /* ★★ 2026-10-15（审查补 · 坑位 43 唯一漏掉的读路径）：改走 readTextSmart。
+       原来 utf8 直读 → GBK 棋谱的备注在棋谱库里是**乱码**，而界面会把它预填进输入框，
+       用户点一下「确定」就原样喂回 setNote —— 中文备注当场变成 '???'。
+       （实测：GN[符创保VS赵文博] 88 字节 → utf8 读得 '������VS���Ĳ�' → 写回变 ??????????） */
+    const text = readTextSmart(file);
+    /* 值里可能有转义的 \] —— 按「转义对 或 非 ] 非 \ 的字符」收口，与 app.js 的 unsgf 同口径 */
+    const m = /GN\[((?:\\.|[^\]\\])*)\]/.exec(text);
+    return m ? m[1].replace(/\\([\s\S])/g, '$1') : '';
   } catch (e) { return ''; }
 }
 
@@ -1465,8 +1503,38 @@ function looksUtf8(buf) {
   return buf.toString('utf8').indexOf('\uFFFD') < 0;
 }
 
+/* SGF 的 `CA[xxx]` 声明 —— 这段只读文件开头（它在根节点上），**按 ASCII 读**：
+   这一步只是「嗅」声明，不能拿还不知道对不对的编码去解全文。 */
+function declaredEncoding(buf) {
+  const head = buf.slice(0, 400).toString('latin1');
+  const m = /CA\[([\x20-\x7e]{1,32})\]/.exec(head);
+  if (!m) return '';
+  const v = m[1].trim().toLowerCase();
+  if (v === 'utf-8' || v === 'utf8') return 'utf8';
+  if (v === 'gb2312' || v === 'gbk' || v === 'gb18030' || v === 'cp936') return 'gbk';
+  if (v === 'big5' || v === 'big-5' || v === 'cp950') return 'big5';
+  return v;                                  // 其它编码原样带出去（能不能解由 decodeWith 说了算）
+}
+/* 按指定编码解码；出现替换字符（解不干净）或本机不支持该编码 → 返回 null，交给调用方兜底 */
+function decodeWith(name, buf) {
+  try {
+    const t = new TextDecoder(name).decode(buf);
+    return t.indexOf('\uFFFD') < 0 ? t : null;
+  } catch (e) { return null; }
+}
+
 function readTextSmart(p) {
   const buf = fs.readFileSync(p);
+  /* ★★ 2026-10-15（审查补 · 坑位 45）：**先看棋谱自己声明的是什么编码**。
+     SGF 规范里 `CA[]` 就是干这个的。原来只有「UTF-8 试探 → GBK 兜底」两条路，
+     于是 `CA[big5]` 的棋谱被当 GBK 解 —— Big5 的双字节区和 GBK 重叠，
+     解出来**不产生 U+FFFD**，而是一堆「看着像中文的错字」，比乱码更隐蔽：
+     用户看着不对劲、改一处备注保存 → Big5 原文被按 GBK 写回，**不可逆**。 */
+  const declared = declaredEncoding(buf);
+  if (declared && declared !== 'utf8' && declared !== 'gbk') {
+    const t = decodeWith(declared, buf);
+    if (t !== null) return t;
+  }
   if (looksUtf8(buf)) return buf.toString('utf8');
   try {
     const asGbk = new TextDecoder('gbk').decode(buf);
@@ -1475,41 +1543,91 @@ function readTextSmart(p) {
   return buf.toString('utf8');
 }
 
-/* 「字符 → GBK 两字节」反查表（懒建，只在真要写 GBK 时才建） */
-let gbkTable = null;
-function gbkEncode(str) {
-  if (!gbkTable) {
-    const dec = new TextDecoder('gbk');
-    gbkTable = new Map();
+/* 「字符 → 两字节」反查表（懒建，只在真要写这种编码时才建）。
+   ★ Node 只有**解码器**（TextDecoder），没有编码器（Buffer 不认 gbk / big5，
+     也没装 iconv-lite）。做法：按需把双字节区反查成表，十几毫秒、两万多字。
+   ★★ 2026-10-15（审查补）：原来只有 GBK 一张表。Big5 棋谱被当 GBK 读已经够糟，
+     再按 GBK 写回去就是**永久损坏**（语料里 1000 份 CA[big5]）——
+     现在两种编码都建表，读什么编码就按什么编码写。 */
+const ENC_TABLES = {};
+function encTable(name) {
+  if (ENC_TABLES[name]) return ENC_TABLES[name];
+  const dec = new TextDecoder(name);
+  const map = new Map();
+  const add = (lead, trail) => {
+    if (map.size >= 40000) return;             // 保险上限（正常 gbk 23939 / big5 13710）
+    const ch = dec.decode(Buffer.from([lead, trail]));
+    if (ch.length === 1 && ch !== '\uFFFD' && !map.has(ch)) map.set(ch, [lead, trail]);
+  };
+  if (name === 'big5') {
+    for (let lead = 0xa1; lead <= 0xf9; lead++) {
+      for (let trail = 0x40; trail <= 0x7e; trail++) add(lead, trail);
+      for (let trail = 0xa1; trail <= 0xfe; trail++) add(lead, trail);
+    }
+  } else {
     for (let lead = 0x81; lead <= 0xfe; lead++) {
-      for (let trail = 0x40; trail <= 0xfe; trail++) {
-        if (trail === 0x7f) continue;
-        const ch = dec.decode(Buffer.from([lead, trail]));
-        if (ch.length !== 1 || ch === '\uFFFD') continue;
-        if (!gbkTable.has(ch)) gbkTable.set(ch, [lead, trail]);
-      }
+      for (let trail = 0x40; trail <= 0xfe; trail++) { if (trail !== 0x7f) add(lead, trail); }
     }
   }
+  ENC_TABLES[name] = map;
+  return map;
+}
+/* 按指定编码编码；这个编码里没有的字用 '?' 兜底，并**如实报出来**（有损，调用方要提示用户） */
+function encodeWith(name, str) {
+  const t = encTable(name);
   const out = [];
   const missing = [];
   for (const ch of str) {
     const c = ch.codePointAt(0);
     if (c < 0x80) { out.push(c); continue; }              // ASCII 一样
-    const b = gbkTable.get(ch);
+    const b = t.get(ch);
     if (b) out.push(b[0], b[1]);
-    else { out.push(0x3f); missing.push(ch); }            // GBK 里没有 → '?'，并如实报给用户
+    else { out.push(0x3f); missing.push(ch); }            // 这个编码里没有 → '?'，并如实报给用户
   }
   return { buf: Buffer.from(out), missing };
 }
+/* GBK 专用入口（老调用点用这个名字；行为与以前逐字节一致） */
+function gbkEncode(str) { return encodeWith('gbk', str); }
 
-/* 按「文件原来的编码」写回；本来没有的新文件用 UTF-8。 */
+/* 原子写盘：先写同目录临时文件，再 rename 顶替 —— 中途崩溃/断电不会留下半截棋谱。
+   （Windows 上同目录 rename 由 libuv 用 MOVEFILE_REPLACE_EXISTING 实现，能盖掉已存在的目标。）
+   ★ 2026-10-15（审查补 P3-7）：用户下载来的棋谱不可再生，写坏没有第二次机会。 */
+function writeFileAtomic(p, data) {
+  const tmp = p + '.tmp-' + process.pid;
+  try { fs.writeFileSync(tmp, data); fs.renameSync(tmp, p); }
+  catch (e) { try { fs.unlinkSync(tmp); } catch (e2) { /* 清不掉就算了，别盖住真错误 */ } throw e; }
+}
+
+/* 让 `CA[]` 与**实际写出的字节**一致（SGF 里它就是干这个的）。
+   ⚠️ 只订正**本来就写了 CA** 的文件；老棋谱大多没有 CA（语料 10185/17290），
+      给它们硬塞一个声明等于「顺手改了无关内容」，不做。 */
+function fixCharsetDecl(text, enc) {
+  if (!/CA\[[^\]]*\]/.test(text)) return text;
+  const want = enc === 'big5' ? 'Big5' : enc === 'gbk' ? 'GBK' : 'UTF-8';
+  return text.replace(/CA\[[^\]]*\]/, 'CA[' + want + ']');
+}
+
+/* 按「文件原来的编码」写回；本来没有的新文件用 UTF-8。
+   ★★ 2026-10-15（审查补 · 坑位 45）：不再「非 UTF-8 就一律按 GBK 写」——
+     先按文件自己的 `CA[]` 声明定编码（而且**必须能无损解回原文**才敢用），
+     于是 Big5 棋谱写完还是 Big5，不会被改成 GBK 而永久损坏。
+   另：按实际写出的编码**订正文件里的 CA[]** —— 原来会留下「字节是 GBK、文件却自称 
+   UTF-8」这种自相矛盾，别的软件读它要再乱一次。 */
 function writeTextSmart(p, text) {
-  let gbk = false;
-  try { gbk = fs.existsSync(p) && !looksUtf8(fs.readFileSync(p)); } catch (e) { gbk = false; }
-  if (!gbk) { fs.writeFileSync(p, text, 'utf8'); return { enc: 'utf8', missing: [] }; }
-  const { buf, missing } = gbkEncode(text);
-  fs.writeFileSync(p, buf);
-  return { enc: 'gbk', missing };
+  let old = null;
+  try { old = fs.existsSync(p) ? fs.readFileSync(p) : null; } catch (e) { old = null; }
+  let enc = 'utf8';
+  if (old && !looksUtf8(old)) {
+    const declared = declaredEncoding(old);
+    if (declared && declared !== 'utf8' && decodeWith(declared, old) !== null) enc = declared;
+    else if (decodeWith('gbk', old) !== null) enc = 'gbk';      // 老口径的兜底
+    else enc = 'utf8';                                          // 认不出来 → 按 UTF-8（与旧行为一致）
+  }
+  const fixed = fixCharsetDecl(text, enc);
+  if (enc === 'utf8') { writeFileAtomic(p, Buffer.from(fixed, 'utf8')); return { enc: 'utf8', missing: [] }; }
+  const { buf, missing } = encodeWith(enc, fixed);
+  writeFileAtomic(p, buf);
+  return { enc, missing };
 }
 
 /* ★★ 坑位 43（2026-10-13 审查补）：覆盖棋谱前的一次性备份，抽成函数。
@@ -1556,7 +1674,13 @@ ipcMain.handle('records:save', (_e, name, text) => {
 ipcMain.handle('records:rename', (_e, oldName, newName) => {
   try {
     const to = safeRecName(newName);
-    fs.renameSync(path.join(RECORDS_DIR, safeRecName(oldName)), path.join(RECORDS_DIR, to));
+    const from = path.join(RECORDS_DIR, safeRecName(oldName));
+    const dest = path.join(RECORDS_DIR, to);
+    /* ★ 2026-10-15（审查补）：**目标同名时不许静默覆盖**用户棋谱（原来直接 rename，
+       被覆盖的那份连 .bak 都没有）。要覆盖得先自己删掉目标。
+       ※ 这个接口目前在渲染进程里 0 引用（死接口），但留着就得守规矩。 */
+    if (fs.existsSync(dest) && dest !== from) return { error: '已经有一份叫「' + to + '」的棋谱了，换个名字' };
+    fs.renameSync(from, dest);
     try {                                       // 复盘结果跟着改名（没复盘过就跳过）
       const ro = reviewPath(oldName), rn = reviewPath(newName);
       if (fs.existsSync(ro)) fs.renameSync(ro, rn);
@@ -1571,9 +1695,18 @@ ipcMain.handle('records:rename', (_e, oldName, newName) => {
 
 ipcMain.handle('records:delete', async (_e, name) => {
   try {
-    await shell.trashItem(path.join(RECORDS_DIR, safeRecName(name)));   // 进回收站，可恢复
+    const full = path.join(RECORDS_DIR, safeRecName(name));
+    await shell.trashItem(full);                                        // 进回收站，可恢复
     try { await shell.trashItem(reviewPath(name)); } catch (e2) { /* 没复盘过就跳过 */ }
     try { await shell.trashItem(coachPath(name)); } catch (e2) { /* 没讲过就跳过 */ }
+    /* ★★ 2026-10-15（审查补 · 坑位 44）：**备份也要一起带走**。
+       原来只删 .sgf / .review.json / .coach.json —— 那份「万一判错位置能捞回来」的
+       `<名字>.sgf.bak` 留在库里成了**孤儿**：
+         · 用户看棋谱库看不出它是什么（不是 .sgf，列表不显示）；
+         · 更要命的是同名棋谱重新导入时，`backupRecordOnce` 见到 .bak 已存在就**跳过备份**，
+           于是那份「最早的备份」其实是**上一份同名棋谱**的内容 —— 以为有副本，实际没保住新的。
+       注意：与棋谱一样进**回收站**（不是硬删），且只在真的存在时才动。 */
+    try { await shell.trashItem(full + '.bak'); } catch (e2) { /* 没备份过就跳过 */ }
     return { ok: true };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 });
@@ -2043,7 +2176,7 @@ ipcMain.handle('app:checkUpdate', async () => {
   /* 记下"上次检查时间"，下次打开设置面板能显示（★ 不影响判断，纯展示） */
   try {
     PATHS.store = Object.assign({}, PATHS.store, { lastUpdateCheck: Date.now() });
-    writeConfig(Object.assign({}, normalizeConfig(PATHS), { recent: PATHS.recent, store: PATHS.store }));
+    writeConfig(configForDisk(Object.assign({}, normalizeConfig(PATHS), { recent: PATHS.recent, store: PATHS.store })));
   } catch (e) { /* 记不上就算了，不影响结果 */ }
 
   const atLeast = verAtLeast(cur, latest);
@@ -2112,8 +2245,16 @@ ipcMain.handle('settings:check', (_e, c) => {
      填了就得真的能写 —— 目录不存在会自动建一下。 */
   let recOk = true;
   if (n.recordsDir) {
-    try { fs.mkdirSync(n.recordsDir, { recursive: true }); fs.accessSync(n.recordsDir, fs.constants.W_OK); }
-    catch (e) { recOk = false; }
+    /* ★ 2026-10-15（审查补）：**这个接口叫「只检测（不保存）」，就不该有写副作用**。
+       原来这里 mkdirSync —— 用户还没点保存，目录先被建出来了。
+       现在：目录已在 → 看它能不能写；目录不在 → 看**父目录**在不在、能不能写
+       （真保存时再由 setDir / settings:save 去建）。 */
+    try {
+      const probe = fs.existsSync(n.recordsDir) ? n.recordsDir : path.dirname(n.recordsDir);
+      if (fs.existsSync(n.recordsDir) && !fs.statSync(n.recordsDir).isDirectory()) recOk = false;
+      else if (!fs.existsSync(probe)) recOk = false;
+      else { fs.accessSync(probe, fs.constants.W_OK); recOk = true; }
+    } catch (e) { recOk = false; }
   }
   return {
     katago:        fileOk(n.katago),
@@ -2186,7 +2327,8 @@ ipcMain.handle('records:setDir', (_e, dir) => {
   }
   const old = RECORDS_DIR;
   const cfg = Object.assign({}, PATHS, { recordsDir: want });
-  const w = writeConfig(cfg);
+  /* ★ 写盘过保护（内存里仍保留解析后的路径 —— 引擎要按它起） */
+  const w = writeConfig(configForDisk(cfg));
   if (w.error) return { error: '写入 settings.json 失败：' + w.error };
   PATHS = cfg;
   refreshRecordsDir(want);
@@ -2209,7 +2351,8 @@ ipcMain.handle('records:setNote', (_e, name, note) => {
     let text = readTextSmart(full);
     const clean = String(note || '').replace(/[\[\]\\]/g, ' ').trim();
     if (/GN\[[^\]]*\]/.test(text)) text = text.replace(/GN\[[^\]]*\]/, 'GN[' + clean + ']');
-    else text = text.replace(/^\(\s*;/, m => m + 'GN[' + clean + ']');
+    /* ⚠️ `\uFEFF?` 不能省：带 BOM 的棋谱首字符是 BOM，`^(` 就匹配不上 → 整段静默失效 */
+    else text = text.replace(/^\uFEFF?\(\s*;/, m => m + 'GN[' + clean + ']');
     const wr = writeTextSmart(full, text);
     return { ok: true, note: clean, enc: wr.enc, missing: wr.missing };
   } catch (e) { return { error: String((e && e.message) || e) }; }
@@ -2239,7 +2382,8 @@ ipcMain.handle('records:setPlayers', (_e, name, pb, pw) => {
       const re = new RegExp(key + '\\[[^\\]]*\\]');
       if (re.test(t)) return t.replace(re, key + '[' + val + ']');
       /* 没这个字段 → 插到根节点开头（和 setNote 一个思路） */
-      return t.replace(/^\(\s*;/, m => m + key + '[' + val + ']');
+      /* ⚠️ 同 setNote：BOM 会让 `^(` 匹配不上（见 P3-8） */
+      return t.replace(/^\uFEFF?\(\s*;/, m => m + key + '[' + val + ']');
     };
     text = set(set(text, 'PB', cl(pb)), 'PW', cl(pw));
     const wr = writeTextSmart(full, text);
@@ -2309,7 +2453,14 @@ app.whenReady().then(() => {
      一开就吃掉几 GB 显存没道理。改成用户手动点「加载」（顶栏的引擎状态灯那里）。
      界面靠 engine:status 事件得知三个引擎都处于「未加载」。 */
   setStatus();
+  /* ★★ 2026-10-15（审查补 · 坑位 47）：**`activate` 必须把 quitting 复位**。
+     macOS 上关掉最后一个窗口走的是 window-all-closed → shutdown()（把 quitting 置真），
+     **但不退出进程**；用户从 Dock 再打开时只 createWindow()，quitting 一直是真 ——
+     于是引擎那两条自愈链（探针失败重试、意外退出自动拉起）全被掐死，
+     界面上就是**永久停在「加载中」、点「加载」也没反应**，只能重启软件。
+     （Windows / Linux 上 window-all-closed 会直接 app.quit()，碰不到这条。） */
   app.on('activate', () => {
+    quitting = false;
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });

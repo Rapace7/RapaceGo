@@ -69,6 +69,44 @@ const expr = `(() => {
     const nowKo = state.koPoint;
     const same = (!wantKo && !nowKo) || (wantKo && nowKo && wantKo.x === nowKo.x && wantKo.y === nowKo.y);
     if (!same) v.push('④劫点不自洽 有=' + (nowKo ? nowKo.x + ',' + nowKo.y : 'null') + ' 应为=' + (wantKo ? wantKo.x + ',' + wantKo.y : 'null'));
+    /* ④b 劫点的**语义判据**（独立实现 —— 不看 koFromBoard 那一套形状判据，
+       而是直接问「对方在这一点回提之后，盘面是不是回到了上一手之前」）。
+       为什么必须另写一条：④ 是拿同一个实现跟自己比，实现本身错了它照不出来
+       （2026-10-15 审查指出：koPoint 原来依赖 captured/capAt 这两个派生字段，
+        在「换了路径还没补字段」的四个入口分别丢失 —— ④ 全程都没抓到）。
+       口径：上一手恰好提掉**一处**子时，那个点才可能是劫；回提能还原上一局面 ⇔ 是劫，
+       且禁着点必须正是它；回提不还原 ⇔ 不是劫，禁着点必须为空。 */
+    (function checkKoBySemantics() {
+      const at = state.viewAt;
+      const last = at >= 1 ? state.moves[at - 1] : null;
+      let sem = null;                                  // 语义上的禁着点（null = 不该有）
+      if (last && !last.pass) {
+        const cur = boardAt(at), prev = boardAt(at - 1);
+        const mine = last.color === 'b' ? 1 : 2;
+        const gone = [];
+        for (let k = 0; k < N * N; k++) if (prev[k] !== 0 && cur[k] === 0) gone.push(k);
+        if (gone.length === 1 && cur[gone[0]] === 0) {
+          const p = gone[0];
+          const sim = Int8Array.from(cur);
+          sim[p] = 3 - mine;                            // 对方回提
+          for (const [nx, ny] of neighbors(p % N, Math.floor(p / N))) {
+            if (sim[idx(nx, ny)] === mine) {
+              const g = group(sim, nx, ny);
+              if (g.libs.size === 0) g.stones.forEach(k => { sim[k] = 0; });
+            }
+          }
+          if (group(sim, p % N, Math.floor(p / N)).libs.size > 0) {   // 不是自杀手
+            let back = true;
+            for (let k = 0; k < N * N; k++) if (sim[k] !== prev[k]) { back = false; break; }
+            if (back) sem = p;                          // 回提还原了上一局面 → 这就是劫
+          }
+        }
+      }
+      const semKo = (sem === null) ? null : { x: sem % N, y: Math.floor(sem / N) };
+      const okSem = (!semKo && !nowKo) || (semKo && nowKo && semKo.x === nowKo.x && semKo.y === nowKo.y);
+      if (!okSem) v.push('④b劫点语义不符（按「回提能否还原上一局面」判）语义=' +
+        (semKo ? semKo.x + ',' + semKo.y : 'null') + ' 程序=' + (nowKo ? nowKo.x + ',' + nowKo.y : 'null'));
+    })();
     /* ⑤ 轮次恒等 */
     if (state.toMove !== sideToMove(state.moves.length)) v.push('⑤轮次=' + state.toMove + ' 应为' + sideToMove(state.moves.length));
     /* ⑥ 树结构：可达数 === 反查数，且 _cs 反向指回 */
@@ -100,6 +138,19 @@ const expr = `(() => {
     applyNewGame(); settings.mode = 'free';
     for (let i = 0; i < 4; i++) tryPlay(3 + i, 3 + i);
     if (!checkAll('起步')) out.steps++;
+    /* ★ 定向场景（2026-10-15 加）：**先摆一个真劫**。
+       随机落子几乎碰不到劫形（要恰好「提掉一处子、且回提能还原上一局面」），
+       所以 ④b 光靠随机跑等于没测 —— 这一小段把「劫」这类局面钉住。
+       摆法：白 (1,1) 被黑三面围住只剩 (2,1) 一口气；黑落 (2,1) 提它，
+       而那颗黑子也是孤子、也只剩一口气（正是被提点）→ 成劫。 */
+    for (const p of [[0, 1], [1, 1], [1, 0], [3, 1], [1, 2], [2, 0], [10, 10], [2, 2], [2, 1]]) tryPlay(p[0], p[1]);
+    if (!checkAll('定向·真劫局面')) out.steps++;
+    gotoView(state.moves.length - 1);
+    if (!checkAll('定向·回看到成劫前')) out.steps++;
+    gotoView(state.moves.length + 1);
+    if (!checkAll('定向·跳回末端')) out.steps++;
+    applyNewGame(); settings.mode = 'free';
+    for (let i = 0; i < 4; i++) tryPlay(3 + i, 3 + i);
     for (let i = 0; i < 2000 && out.violations.length < 3; i++) {
       const [name, fn] = ops[Math.floor(Math.random() * ops.length)];
       try { fn(); } catch (e) { /* 无效操作不算 */ }
@@ -119,5 +170,5 @@ const okAll = r.violations.length === 0 && !r.errors;
 console.log('跑了 ' + r.ops + ' 步随机操作；违规 ' + r.violations.length + ' 处');
 for (const x of r.violations) console.log('  ✗ ' + x.tag + ' → ' + x.v.join(' | '));
 if (r.errors) console.log('  ✗ 异常: ' + r.errors);
-console.log(okAll ? '\n不变式自检：全部通过（①路径 ②颜色 ③游标 ④劫点 ⑤轮次 ⑥树结构 ⑦草稿）' : '\n不变式自检：**未通过**');
+console.log(okAll ? '\n不变式自检：全部通过（①路径 ②颜色 ③游标 ④劫点 ④b劫点语义 ⑤轮次 ⑥树结构 ⑦草稿 ＋ 定向劫场景）' : '\n不变式自检：**未通过**');
 process.exit(okAll ? 0 : 1);

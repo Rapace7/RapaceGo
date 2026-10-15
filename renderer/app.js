@@ -668,6 +668,11 @@ function pushPassNode() {
   if (!nd) { nd = { pass: true, color: state.toMove, _p: parent, _cs: [] }; parent._cs.push(nd); }
   state.moves.push(nd);
   clearCoachAt(state.moves.length);             // 该手号上的旧讲解作废
+  /* ★ 2026-10-15（审查补 · P2-1 入口①）：**脱先一手，劫自然消解** ——
+     这条原来只写在「人类停一手」那一处（app.js 的 btn-pass），AI 停一手那条漏了，
+     于是 AI 脱先后禁着点还挂着：轮到人时连**普通合法的一手**落在那个点都会被误报「打劫」。
+     现在收口进函数里 —— 以后谁再加第三个 pass 入口都不会漏。 */
+  state.koPoint = null;
   return nd;
 }
 
@@ -896,7 +901,11 @@ function promoteToMainline(at) {
   const node = state.moves[at - 1];
   const p = node && node._p;
   if (!p) { flash('这一手没法提升'); return false; }
-  if (p._cs[0] === node) { flash('第 ' + at + ' 手已经在主变上了'); return false; }
+  /* ★ 2026-10-15（审查补 · P2-6）：判据换成 `onMainline`（沿祖先链查到根）。
+     原来用「我是父节点的头一个孩子」——那只是**局部**判据：侧支深处的珠子对它父亲
+     同样是 `_cs[0]`，于是右键菜单给出「设为主变」、点了却被挡回「已经在主变上了」。
+     菜单侧本来就是用 onMainline 判的 —— 两套判据必有一次对不上（这条就是）。 */
+  if (onMainline(node)) { flash('第 ' + at + ' 手已经在主变上了'); return false; }
 
   stashExplainAfter(0);
   stashAnalysisAfter(0);
@@ -1461,6 +1470,13 @@ function treeLayout() {
   /* ---------- ② 主变：占第 0 行，沿 _cs[0] 一路往右 ----------
      ⚠️ 虚拟根（branchRoot）**不入格、不占列** —— 它只是"所有支的共同起点"。
         曾被写成"put 之后再 pop/delete"，那样列 0 会被它白占一格、第 1 手的连线也少一段。 */
+  /* ★★ 2026-10-15（审查补 · P2-5）：给虚拟根一个**不计入格子的影子位置**。
+     「第 1 手就分叉」的棋谱（`(;B[pd])(;B[dd])`）里，两条支的父都是 branchRoot，
+     而它从来不被 put（怕白占列 0）→ 第 ③ 段的轮放循环拿 `treePosOf.get(b.parent)` 当
+     「父还没画出来」，永远 defer，最后一轮「没有进展 → 收工」把**整条支连同它后面的一起丢掉**：
+     用户看着自己正走的那一支在树上一颗珠子都没有，也没有 .cur。
+     ⚠️ 用 set 而不是 put：影子位置不占格子、不进 treeCells（免得退回「白占列 0」那个坑）。 */
+  treePosOf.set(branchRoot, { d: 0, r: 0, n: branchRoot });
   {
     let n = branchRoot, d = 0;
     for (;;) {
@@ -1824,7 +1840,7 @@ function showTreeMenu(ev2, node) {
   item(onMain ? '已是主变（第 ' + depth + ' 手）' : '设为主变（第 ' + depth + ' 手）', () => {
     if (!onMain) { gotoNode(node); promoteToMainline(depth); }
     closeTreeMenu();
-  }, '把这一手所在的那条支提为主变（快捷键 PgUp）');
+  }, '把这一手所在的那条支提为主变');   // ★ P3-9：PgUp 快捷键本轮已删，文案别再教用户按
   /* ★ 2026-10-15（首相要求）：删除改成**弹窗确认**。
      原来这里是"两段式"——点一次只把按钮文案变成「再点一次确认删除」、上方 flash 一句；
      首相实测后明确要求："不弹是否确认删除的弹窗只在上方提醒一句，这不好，搞成确认弹窗和按钮"。
@@ -2123,7 +2139,12 @@ function tryPlay(x, y, byAI) {
       ndNew = { x, y, color: state.toMove, captured, capAt: capAt || undefined, _p: ndParent, _cs: [] };
       ndParent._cs.push(ndNew);
     }
-    state.moves.push(ndNew);
+    /* ★★ 2026-10-15（审查补 · P1-1）：**复用已有节点时必须沿 `_cs[0]` 把尾巴接回来**。
+       原来只 push 这一个节点 —— 于是 `pathThrough(ndNew)` 比 `state.moves` 长：
+       悔棋后重下同一手，原来那条支明明还在树上，却点不动珠子、滑杆拉不到底、
+       → 键不动，看着像**后半盘棋丢了**（三条翻页路都被静默夹回，连提示都没有）。
+       复用与新建在这里合流：一律走 pathThrough + setPath（换路径的唯一出口）。 */
+    setPath(pathThrough(ndNew));
   }
   clearCoachAt(state.moves.length);      // 这个手号上的旧讲解作废（悔棋换了别的棋，见函数注释）
   clockSwitch();                         // 结算本手用时，换对方
@@ -2156,15 +2177,30 @@ function tryPlay(x, y, byAI) {
       于是要么错拦一个点、要么该拦的没拦。现在把 at 显式传进来，盘面与手一一对应。 */
 function koFromBoard(b, moves, at) {
   const n = (at === undefined) ? moves.length : at;
+  if (n <= 0) return null;
   const last = moves[n - 1];
-  if (!last || last.pass || last.captured !== 1 || !last.capAt) return null;
+  if (!last || last.pass) return null;
   const c = last.color === 'b' ? 1 : 2;
   if (b[idx(last.x, last.y)] !== c) return null;              // 保险：这一手已不在盘上（被提了）
+  /* ★★★ 2026-10-15（审查补 · **根治**）：「这一手提了哪一点」改成**直接比两幅盘面**算出来。
+     原来读 `last.captured` / `last.capAt` 这两个派生字段，而它们只由 `rebuildCapAt()`
+     按**当前路径**补 —— 凡是「换了路径但还没补字段」的时刻（切分支 / 提主变 / 删分支 /
+     撤销删除 / 回看岔出的新支 / 草稿）它们都是空的，禁着点于是算成 null，
+     **非法提回被放行**（违反规则）。审查单说它「在四个入口分别丢失」，根因就是这一个 ——
+     现在判据只读盘面，树上任何来源的节点都不会失效。
+     ⚠️ 别改回依赖派生字段：那正是「同一条病修了四处入口、第五处又漏」的来源。 */
+  const prev = boardAt(n - 1);                                // 这一手走之前的盘面
+  let capAt = -1, capCnt = 0;
+  for (const [nx, ny] of neighbors(last.x, last.y)) {
+    const k = idx(nx, ny);
+    if (prev[k] && prev[k] !== c && b[k] === 0) { capAt = k; capCnt += 1; }
+  }
+  if (capCnt !== 1) return null;                              // 没提子 / 提了不只一子 → 不是劫
   const libs = group(b, last.x, last.y).libs;
   if (libs.size !== 1) return null;                          // 我提子后不止一口气 → 不是劫
-  if ([...libs][0] !== idx(last.capAt.x, last.capAt.y)) return null;   // 那口气不是被提点 → 不是劫
+  if ([...libs][0] !== capAt) return null;                    // 那口气不是刚提掉的那一点 → 不是劫
   if (neighbors(last.x, last.y).some(([nx, ny]) => b[idx(nx, ny)] === c)) return null;  // 不是孤子 → 不是劫
-  return { x: last.capAt.x, y: last.capAt.y };
+  return { x: capAt % N, y: Math.floor(capAt / N) };
 }
 
 /* ★ 悔棋之后补上每手的 `capAt`（"这一手提掉了哪一点"）—— 打劫判据要用它。
@@ -2439,7 +2475,11 @@ function syncUI() {
        · 终局数子 → 悔棋 / 续下 → at ≠ viewAt → 收起 ✓
        · 手动数子 → 局面没动 → 留着 ✓；一旦落子 → at ≠ viewAt → 收起 ✓
      认输是终局，不动它 —— 认了就是认了。 */
-  if (state.result && !state.result.resign && state.result.at !== state.viewAt) state.result = null;
+  /* ★★ 2026-10-15（首相口径「**终局后允许继续**」）：结果条一律按「局面变没变」收起。
+     原来特意放过 `resign`（「认了就是认了」），于是认输后接着下，结果条一直挂着旧胜负 ——
+     与棋盘上正在走的局面自相矛盾。现在任何结果（认输 / 超时 / 数子）只要局面变了就收起。
+     ⚠️ 认输那一刻 at === viewAt，结果条照常弹出，不会「认了却看不到」。 */
+  if (state.result && state.result.at !== state.viewAt) state.result = null;
   renderVerdict();
 
   draw();
@@ -2475,6 +2515,13 @@ function flash(msg) {
 
 function gotoView(n) {
   state.viewAt = Math.max(0, Math.min(state.moves.length, n));
+  /* ★★ 2026-10-15（自检抓到的第 41 条，审查单没提）：**翻手数也要重算劫点**。
+     refreshDerived 的口径写得很清楚 —— 「劫点按**正在看的那一手**算，不按末端」，
+     而落子 / 悔棋 / 切分支 / 提主变 / 删分支都调了，唯独这里（翻手数）漏了：
+     回看到「刚提完劫」之前的一手时，state.koPoint 还挂着末端那一手的值 ——
+     不变式④/④b 在定向劫场景上直接报了出来（自检的定向用例就是这么发现的）。
+     落入这条路径的入口有一堆：滑杆 / ←→ / 点珠子 / 跳首末，全部收在这里。 */
+  refreshDerived();
   clockTouch();          // 跳转后本手重新计时，免得把翻谱的时间算进去
   syncUI();
 }
@@ -2598,6 +2645,10 @@ function exitDraft() {
   gameGen++;
   resetAnalysisState();                  // history 被整体换回来了 → 欠账与上屏标记一起作废重来
   Object.assign(state.clock, s.clock);   // 保持同一个 clock 对象（renderClocks 一直指着它）
+  /* ★★ 2026-10-15（审查补 · P1-3）：**把本手起点拉回「现在」**。
+     快照里的 `since` 是「进入试下那一刻」，直接盖回来会让下一个 tick 把**整段试下时长**
+     当成这一手的思考时间：轻则抹掉主时间，重则直接判负（实测：试下 6 分钟后退出 → 判负）。 */
+  state.clock.since = performance.now();
   state.result = s.result;
   state.lastEval = s.lastEval;
   state.draft = null;
@@ -2708,7 +2759,12 @@ async function runScore(silent) {
       unit: SCORE_UNIT[settings.rules] || '子',
       resign: false,
       by: 'score',
-      terminal: isTerminal(),
+      /* ★ 2026-10-15（审查补 · P2-17）：按**被数的那一段**判终局，不按整盘末端。
+         回看中数子时 at0 是「数的是第几手」，而 isTerminal() 读的是整盘末端 ——
+         结果被标成「终局」，与用户眼前的局面不符。 */
+      terminal: at0 >= 2
+        && !!(state.moves[at0 - 1] && state.moves[at0 - 1].pass)
+        && !!(state.moves[at0 - 2] && state.moves[at0 - 2].pass),
       /* ★ 记下「是在第几手时数的」：手动数子（局面非终局）时局面没变，结果应当留着；
          一旦落子/悔棋导致 viewAt 变化就自动收起（见 syncUI 里那句清理）。
          ⚠️ 用**发起时**定下来的 at0，不用当前的 viewAt —— 等引擎的那一两秒里
@@ -2727,8 +2783,12 @@ async function runScore(silent) {
 }
 
 /* 认输：loser = 认输方，by = 'user' | 'ai' */
-function doResign(loser, by) {
-  if (state.result || !state.moves.length) return;
+function doResign(loser, by, opts) {
+  if (state.result) return;
+  /* ★ 2026-10-15（审查补 · P3-11）：空局（一手都没落）默认不算认输 —— 但**超时得算**。
+     原来超时也走这里、被 `!moves.length` 一句早退：结果条永不弹出，
+     而 expireClock 已经把 c.expired / c.running 置死 → 整局计时静默报废。 */
+  if (!state.moves.length && !(opts && opts.allowEmpty)) return;
   state.result = {
     winner: loser === 'b' ? 'w' : 'b',
     lead: null,
@@ -2736,17 +2796,32 @@ function doResign(loser, by) {
     resign: true,
     by: by || 'user',
     terminal: true,
+    /* ★ 2026-10-15：记下「是在第几手认的」—— syncUI 靠它判断「局面变过没有」。
+       终局后继续落子 → at ≠ viewAt → 结果条收起（首相同意「允许继续」）。 */
+    at: state.moves.length,
   };
 }
 
 /* AI 认输：落后太多就投子（围棋惯例），免得用户单方面屠龙、局面僵在那里 */
 function aiWantsResign() {
-  const e = state.lastEval;
-  if (!e) return false;
+  /* ★★ 2026-10-15（审查补 · P2-2）：**读「末端那一手」的评估，不读 lastEval**。
+     `lastEval` 的语义是「最近一次算过的局面」—— 回看时 applyAnalysis 只校验
+     `at === state.viewAt`，于是它被写成**历史局面**的值；而这里配的却是 state.moves.length（末端手数）：
+     用户回看到 AI 大幅落后的一手 → 跳回末端 → AI 立刻投子认输，而实际局面并不落后。
+     时序上必踩：syncUI 里 scheduleAIMove（120ms）**先于** scheduleAnalysis（200ms + 0.4~1.5s），
+     认输判断跑在新结果覆盖 lastEval 之前。
+     现在读 history/leads 的**末端格**（两套都是黑方视角，见 rememberEval）——
+     那正是「当前局面的评估」，与 state.moves.length 天然配套。 */
+  const n = state.moves.length;
+  if (n < 30) return false;
+  const bw = state.history[n];
+  if (typeof bw !== 'number') return false;
+  const bl = state.leads[n];
   const aiSide = state.myColor === 'b' ? 'w' : 'b';
-  const aiWin = aiSide === 'b' ? e.blackWin : 1 - e.blackWin;
-  const aiLead = aiSide === 'b' ? e.lead : -e.lead;
-  return state.moves.length >= 30 && aiWin < 0.03 && aiLead < -20;
+  const aiWin = aiSide === 'b' ? bw : 1 - bw;
+  /* 目差没算出来时按 0 处理 → 不认输（宁可晚认，也不误判） */
+  const aiLead = (typeof bl === 'number') ? (aiSide === 'b' ? bl : -bl) : 0;
+  return aiWin < 0.03 && aiLead < -20;
 }
 
 function renderVerdict() {
@@ -2954,10 +3029,19 @@ function buildSGF() {
   let s = `(;GM[1]FF[4]SZ[${N}]CA[UTF-8]AP[RapaceGo:0.3]KM[${settings.komi}]RU[${R.sgf}]`
     + `PB[${sgfn(clockName('b'))}]PW[${sgfn(clockName('w'))}]`;
   if (R.seats) s += 'GC[明清规则：座子制 · 还棋头]';
-  if (R.seats || settings.handicap) {
+  /* ★★★ 2026-10-15（审查补 · P0-2）：判据改成「**盘上真有摆子**」，不再看 settings.handicap。
+     原条件 `R.seats || settings.handicap` 有个致命场景：打开任何带摆子的棋谱后，
+     applyRecord 会把 settings.handicap 归零（注释写「让子/座子由 setup 表达」，
+     但 buildSGF 从没把 state.setup 无条件写出去）—— 于是这个 if 整段不执行：
+     「覆盖 / 导出」写出来的文件**没有 AB/AW**，手顺还在但盘面少了摆子，
+     重开时局面与当初不一致（依赖摆子的提子 / 死活全错）。
+     HA 只在「非座子 + 只有黑方摆子 + 至少 2 子」时写 —— 别写出「既有 HA 又有 AB 却数目对不上」。 */
+  const bsCount = state.setup.filter(p => p.color === 'b').length;
+  const wsCount = state.setup.filter(p => p.color === 'w').length;
+  if (state.setup.length || R.seats) {
     const bs = state.setup.filter(p => p.color === 'b').map(p => `[${SGF_COLS[p.x]}${SGF_COLS[p.y]}]`).join('');
     const ws = state.setup.filter(p => p.color === 'w').map(p => `[${SGF_COLS[p.x]}${SGF_COLS[p.y]}]`).join('');
-    if (!R.seats) s += `HA[${settings.handicap}]`;   // 座子不是让子，不写 HA
+    if (!R.seats && bsCount >= 2 && wsCount === 0) s += `HA[${bsCount}]`;   // 座子不是让子，不写 HA
     if (bs) s += `AB${bs}`;
     if (ws) s += `AW${ws}`;
   }
@@ -3112,9 +3196,15 @@ function parseSGF(text) {
       if (t === ')') { k++; break; }
       if (t === '(') {
         const sub = parseTree(k);
-        if (!sub) { k++; continue; }                     // 空树 `()`：跳过，别把整棵解析带崩
+        /* ★★ 2026-10-15（审查补 · P2-11）：**空树 `()` 也必须把游标交回来**。
+           原来空树返回 null，调用方补一个 `k++` 想「跳过」—— 可递归**内部已经吃掉了那个 `)`**，
+           外层再 `k++` 就正好落在 `)` 上 → 本层以为这棵树结束 → **后面的顺序节点和兄弟变着全丢**。
+           真实语料对照（17290 份）：98 份含 `()`（飞燕围棋安卓版导出的死活词典大量这么写），
+           最坏的一份主线 0 手（原文正解 5 手），界面直接报「读不出手顺」。
+           修法：parseTree **永远返回 { node, next }**（node 可为 null），调用方只管收 next。 */
+        if (!sub) { k++; continue; }                     // 理论到不了（进函数已确认是 '('）
         k = sub.next;
-        if (cur) cur.kids.push(sub.node);                // 子变着挂在**上一层最后一个节点**上
+        if (cur && sub.node) cur.kids.push(sub.node);     // 子变着挂在**上一层最后一个节点**上
         continue;
       }
       const nd = { tok: t, kids: [] };
@@ -3122,7 +3212,7 @@ function parseSGF(text) {
       cur = nd;
       k++;
     }
-    return first ? { node: first, next: k } : null;
+    return { node: first, next: k };                     // ★ first 可为 null（空树），next 一定有效
   };
   const head = toks.indexOf('(');
   const rootTn = head >= 0 ? parseTree(head) : null;      // 只解析第一棵树（一个文件可能串着好几局）
@@ -3139,18 +3229,6 @@ function parseSGF(text) {
     }
     return null;
   };
-  const allPts = id => {
-    const out = [];
-    for (const nd of nodes) {
-      for (const p of nd.props) {
-        if (p.id !== id) continue;
-        for (const v of p.vals) {
-          if (v.length === 2) out.push({ x: v.charCodeAt(0) - 97, y: v.charCodeAt(1) - 97 });
-        }
-      }
-    }
-    return out;
-  };
   /* SGF 值里的转义：`\]` → `]`、`\\` → `\`（换行是原文里的换行，保留） */
   const unsgf = v => String(v).replace(/\\([\s\S])/g, '$1');
 
@@ -3161,6 +3239,39 @@ function parseSGF(text) {
      避免把节点当成属性后永远回退到 19 路。 */
   const declaredSize = parseInt(firstProp('SZ'), 10);
   const boardSize = declaredSize >= 2 && declaredSize <= 52 ? declaredSize : 19;
+
+  /* ★★ 2026-10-15（审查补 · P2-13 / P3-13）：**认 `AE[]`，并顺手补坐标范围检查**。
+     原来只有 `allPts('AB')` / `allPts('AW')`：
+       · `AE`（Add Empty，FF[4] 的「把这些点上的子拿掉」，语料 66 份、32 份在根节点）
+         完全不认 → AE 的点照旧摆上去，**用户解的是另一道题**；
+         更糟的是按「覆盖」还会把这些多出来的子固化成 `AB[]` 写回文件。
+       · 越界坐标（如题集的 `zz` 分隔标记）不判就进盘面。
+     口径：按节点、按属性出现顺序处理 AB / AW / AE —— AE 命中的点从结果里删掉。
+     ⚠️ 这段必须在 boardSize 声明**之后**（拿它判越界）；放前面会撞 TDZ，实测报
+        「Cannot access 'boardSize' before initialization」。 */
+  const setupPts = [];
+  {
+    const where = new Map();                       // 'x,y' → setupPts 下标
+    for (const nd of nodes) {
+      for (const p of nd.props) {
+        if (p.id !== 'AB' && p.id !== 'AW' && p.id !== 'AE') continue;
+        for (const v of p.vals) {
+          if (v.length !== 2) continue;
+          const x = v.charCodeAt(0) - 97, y = v.charCodeAt(1) - 97;
+          if (x < 0 || y < 0 || x >= boardSize || y >= boardSize) continue;   // ★ 越界点丢掉
+          const key = x + ',' + y;
+          const i0 = where.get(key);
+          if (p.id === 'AE') {
+            if (i0 !== undefined) { setupPts[i0] = null; where.delete(key); }
+            continue;
+          }
+          const stone = { x, y, color: p.id === 'AB' ? 'b' : 'w' };
+          if (i0 === undefined) { where.set(key, setupPts.length); setupPts.push(stone); }
+          else setupPts[i0] = stone;               // 同点重复声明 → 后写的算数
+        }
+      }
+    }
+  }
 
   const moves = [], comments = [], mainLine = [], seps = [];
   /* 根节点（棋谱开头那个节点）的说明文字 —— 单独存，不占「第 0 手」那个键。
@@ -3210,7 +3321,13 @@ function parseSGF(text) {
     let cSpan = null;
     for (const p of nd.props) {
       if (p.id !== 'C' || !p.vals.length) continue;
-      if (p.valAt && p.valAt.length) cSpan = [p.valAt[0], p.valAt[0] + p.vals[0].length];
+      /* ★ 2026-10-15（审查补 · P3-5）：cSpan 记**整个属性**（含所有值），不只是第一个值。
+         多值写法 `C[a][b]` 时，原来清空只删掉 `C[a]`，留下游离的 `[b]` ——
+         它会被当成**前一个属性**（常常是 AW）的续值，那段长文从此再也显示不出来。 */
+      if (p.valAt && p.valAt.length) {
+        const li = Math.min(p.valAt.length, p.vals.length) - 1;
+        cSpan = [p.valAt[0], p.valAt[li] + p.vals[li].length];
+      }
       /* ★★ 2026-10-06 深夜补（用户报「一点开编辑，所有文段自动划分并加空行」）。
          真凶：有些棋谱（实测用户那份「绝艺解说」的职业棋谱）换行写的是
          **`\r\r\n`（CR CR LF）**，全文 690 处；而 `<div pre-wrap>` 把它渲染成
@@ -3239,7 +3356,8 @@ function parseSGF(text) {
   const size = boardSize;
   const kmRaw = firstProp('KM');
   const komi = kmRaw === null ? null : parseFloat(kmRaw);
-  const ab = allPts('AB'), aw = allPts('AW');
+  const ab = setupPts.filter(p => p && p.color === 'b');
+  const aw = setupPts.filter(p => p && p.color === 'w');
   const ru = String(firstProp('RU') || '').toLowerCase();
   let rules = 'chinese';
   if (ru.indexOf('japan') >= 0) rules = 'japanese';
@@ -3342,8 +3460,13 @@ function applyCommentPatch(text, span, newText) {
 
 function patchSGFComment(text, at, newText) {
   const p = parseSGF(text);
+  /* ★ 2026-10-15（审查补 · P2-12）：根节点要挑**带 C 的那一条**。
+     `mainLine` 里 `isRoot` 可以有多条（判据是「这一节点没落子、且 rootComment 还没设过」）——
+     古谱常见结构：第一个节点是纯元数据（无 C）、第二个「无落子节点」才带说明。
+     `.find` 拿的是第一条，它 `cSpan` 为 null → 新 C 被**插到第一个节点**，旧 C 原地不动；
+     于是「清空 + 保存」看着生效了，重开会话旧说明又回来。 */
   const ent = at === -1
-    ? (p.mainLine || []).find(x => x.isRoot)
+    ? ((p.mainLine || []).find(x => x.isRoot && x.cSpan) || (p.mainLine || []).find(x => x.isRoot))
     : (p.mainLine || []).find(x => !x.isRoot && x.moveIdx === at);
   if (!ent) {
     return { error: at === -1 ? '这份棋谱的根节点上没有说明文字' : '这份棋谱里找不到第 ' + at + ' 手' };
@@ -3379,7 +3502,11 @@ function patchSGFCommentAtNode(text, node, newText) {
   let cSpan = null;
   for (const pr of tok.props) {
     if (pr.id !== 'C' || !pr.vals.length) continue;
-    if (pr.valAt && pr.valAt.length) cSpan = [pr.valAt[0], pr.valAt[0] + pr.vals[0].length];
+    /* ★ 同 P3-5：整个属性区间（多值 `C[a][b]` 也要一起删干净） */
+    if (pr.valAt && pr.valAt.length) {
+      const li = Math.min(pr.valAt.length, pr.vals.length) - 1;
+      cSpan = [pr.valAt[0], pr.valAt[li] + pr.vals[li].length];
+    }
   }
   return applyCommentPatch(text, { cSpan, end: tok.end }, newText);
 }
@@ -5291,6 +5418,9 @@ function applyAnalysis(p, at) {
   const cp = String((p.root && p.root.currentPlayer) || '').toUpperCase();
   const side = cp === 'B' ? 'b' : cp === 'W' ? 'w' : sideToMove(at);
 
+  /* ★ 2026-10-15（审查补 · P2-17）：字段缺失/类型不对就别上屏 —— 与 blackLeadFrom 口径对齐。
+     原来会把 undefined 算成 NaN，界面上直接显示「黑 NaN%」。 */
+  if (typeof p.root.winrate !== 'number' || typeof p.root.scoreLead !== 'number') return false;
   const blackWin = side === 'b' ? p.root.winrate : 1 - p.root.winrate;
   const whiteWin = 1 - blackWin;
   const lead = side === 'b' ? p.root.scoreLead : -p.root.scoreLead;   // 正 = 黑领先
@@ -5478,7 +5608,10 @@ function needAIMove() {
   return settings.mode === 'play'
     && !state.noGame            // ★ 未开局：AI 也不落子（否则执白时一启动它就自己下起来了）
     && !state.draft              // ★ 试下（草稿）时 AI 不自动落子 —— 是你在摆，不是在下棋
-    && !state.result             // ★ 本局已结束（数子出结果 / 认输）→ 不再落子
+    /* ★★ 2026-10-15（首相口径「终局后允许继续」）：**去掉 `!state.result`**。
+       终局（认输 / 超时 / 数子）之后棋盘本来就允许继续落子，而 AI 因为这一句不应手，
+       人机模式下就成了「我落一手 → 轮到他、他不下 → 我再也下不了第二手」。
+       现在 AI 照常应手；结果条由 syncUI 按「局面变没变」收起（见那里的注释）。 */
     && engineReadyPlay           // ★ 是「对弈引擎」就绪，不是分析引擎
     && !aiBusy
     && state.viewAt === state.moves.length
@@ -5601,7 +5734,11 @@ async function maybeAIMove() {
       return;
     }
     /* 期间局面被改动了（悔棋 / 回看 / 切模式后手动落子）→ 这手作废 */
-    if (state.moves.length !== expectLen || state.viewAt !== state.moves.length) { retry = true; return; }
+    /* ★★ 2026-10-15（审查补 · P2-3）：**补上 state.draft 这道闸门**。
+       轮到 AI 走（请求已发出未返回）时用户点「试下」：此刻 moves.length 与 viewAt 都没变、
+       gameGen 也没变（那是 exitDraft 才自增的），于是上面两道校验全过 ——
+       AI 就把自己那一手落进了**草稿**里，与「试下期间 AI 不自动落子」的承诺矛盾。 */
+    if (state.moves.length !== expectLen || state.viewAt !== state.moves.length || state.draft) { retry = true; return; }
     if (!res || res.error) {
       /* ★ 也走重试（下面的 finally 里那套 aiRetry 上限 3 次）。
          原来这里直接 return → 引擎偶尔超时/出错一次，AI 就停在那儿不动了，
@@ -5619,7 +5756,10 @@ async function maybeAIMove() {
       syncUI();
     } else if (pick) {
       aiRetry = 0;
-      tryPlay(pick.x, pick.y, true);
+      /* ★ 2026-10-15（审查补 · P2-17）：**返回值不能丢**。
+         AI 挑到的点若被闸门拦下（打劫禁着点 / 已有子），原来什么都不做也不重试 →
+         界面就停在那儿：AI 不动、人也动不了。 */
+      if (!tryPlay(pick.x, pick.y, true)) retry = true;
     } else {
       retry = true;
       flash('AI 没找到可下的点');
@@ -6176,7 +6316,7 @@ function expireClock(side, reason) {
   if (c.expired) return;
   c.expired = side;
   c.running = false;
-  doResign(side, 'timeout');
+  doResign(side, 'timeout', { allowEmpty: true });   // ★ 空局超时同样出结果（见 doResign 注释）
   renderClocks();
   flash((side === 'b' ? '黑方' : '白方') + '超时 · 判负（' + reason + '）');
   syncUI();
@@ -6222,6 +6362,11 @@ function maybeBeepSecond() {
 function clockTick() {
   const c = state.clock;
   if (!c.on || !c.running || c.expired || c.paused) return;   // 试下（草稿）期间暂停
+  /* ★★ 2026-10-15（审查补 · P1-2）：**回看历史手时不走表** —— 与显示侧 clockDisplay 对齐。
+     原来只有显示侧停了（`viewAt === moves.length` 才画成 active），内核照扣不误：
+     用户切回历史手、数字纹丝不动，时间却在背后流逝，耗尽直接把人在**回看状态下判负**。
+     （口径：回看期间双方都不计时；回到最新一手后从当前时刻继续。） */
+  if (state.viewAt !== state.moves.length) return;
   const now = performance.now();
   const el = Math.max(0, (now - c.since) / 1000);
   const st = c[c.side];
@@ -6236,8 +6381,10 @@ function clockTick() {
     }
   } else if (c.byo > 0) {
     if (el >= c.byo) {
+      /* ★ 2026-10-15（审查补 · P2-14）：**先判后扣**。原来是「先 n-=1、再判 n<0」——
+         设 3 次读秒实际给了 **4 次** 30 秒（第 4 次才判负），比规则多一整次。 */
       st.n -= 1;                                                    // 读秒一次用完，扣一次
-      if (st.n < 0) { expireClock(c.side, '读秒次数已用尽'); return; }
+      if (st.n <= 0) { expireClock(c.side, '读秒次数已用尽'); return; }  // 用尽 → 判负
       c.since = now;                                                // 还有次数 → 重新读一次
     }
   }
@@ -6286,6 +6433,10 @@ let terrCv = null, terrCx = null, terrIm = null;
 function drawTerritory() {
   const o = state.ownership;
   if (!state.showTerritory || !o || o.length !== N * N) return;
+  /* ★ 2026-10-15（审查补 · P2-17）：**这批 ownership 必须属于当前看的那一手**。
+     候选点那批早有 `candAt === viewAt` 的守卫，形势雾漏了同一道 ——
+     回看时画的是**别的手**的形势（用户以为这盘就长这样）。 */
+  if (state.ownAt !== state.viewAt) return;
 
   const blocksMode = state.terrStyle === 'blocks';
   const W = N + 2;
@@ -6336,6 +6487,8 @@ function drawTerritory() {
    TERR_STONE_MIN = 0.85 也照抄 KaTrain（我起初用 0.5，太夸张、会让人误以为已经提掉了）。 */
 function stoneAlphaAt(x, y, stone) {
   if (!state.showTerritory || state.terrStyle !== 'fog') return 1;
+  /* ★ 同 drawTerritory：不是当前这一手的形势就别拿来染棋子（死子变淡会张冠李戴） */
+  if (state.ownAt !== state.viewAt) return 1;
   const o = state.ownership;
   if (!o || o.length !== N * N) return 1;
   const v = o[y * N + x];
@@ -6759,7 +6912,10 @@ function editComment() {
 
   /* ★ 「开局前」这一档：如果这份棋谱有根节点说明，那这里改的就是**棋谱说明**
      （它不属于任何一手，onclick 里会走 patchSGFComment(text, -1, …)）。 */
-  const isRoot = at === 0 && !!String(state.rootComment || '').trim();
+  /* ★ 2026-10-15（审查补 · P2-17）：判据就是「是不是根」，别掺「有没有根说明」——
+     原来带着 `&& rootComment 非空`，于是**首次补根说明必定失败**，
+     而界面上还提示「点编辑可以补上」，用户怎么点都补不上。 */
+  const isRoot = at === 0;
 
   const ta = document.createElement('textarea');
   /* ★ 显示给用户的这份也统一成 CRLF 口径，跟磁盘上的文件一致 ——
@@ -7858,6 +8014,17 @@ function bestPointNote(best, v, sideTxt) {
 }
 
 
+/* 只处理「含百分比的句子」那一条规则。
+   ★★ 2026-10-15（审查补 · P2-16）：**没有 `%` 就直接返回**。
+   这条规则本来就要把整段扫一遍，而病态输入（超长数字串、全篇没有 `%`）正是它最慢的时候：
+   实测纯数字串 400→10ms / 1600→562ms / 3200→**4306ms**（每翻倍约 7~8 倍）——
+   主线程直接卡死。它只在「讲完那一跳」和 coordOk 复检时跑，所以症状是「讲完卡几秒」。
+   两道保险：① 整段没有 `%` 就不必扫；② 数字/小数的位数加上界，长数字串退化成常数次尝试。 */
+function stripPercentClaims(s) {
+  if (s.indexOf('%') < 0) return s;
+  return s.replace(/[^。！？；\n%]{0,40}\d{1,12}(?:\.\d{1,6})?\s*%[^。！？；\n]{0,60}[。！？；]?/g, '');
+}
+
 /* 清掉它偶尔带出来的标签和结论框 */
 function cleanCoachText(s) {
   return dedupeRepeatSentences(String(s || '')
@@ -7908,7 +8075,13 @@ function cleanCoachText(s) {
        所以含百分比的整句一律删掉。
        ⚠️ 安全：程序写的第二段对照句（bestPointNote，里面也有百分比）
          是在 coachTextReady **之后**才拼上去的，不会被这里误伤。 */
-    .replace(/[^。！？；\n]*\d+(\.\d+)?\s*%[^。！？；\n]*[。！？；]?/g, '')
+    /* ★ 2026-10-15（审查补 · P2-16）：给否定类加两个限制，去掉灾难性回溯。
+       原来 `[^。！？；\n]*` 把数字和 `%` 也吃进去，长数字串又没 `%` 时退化成近 O(n³)：
+       实测纯数字串 400→10ms / 800→74ms / 1600→562ms / 3200→4306ms（每翻倍约 7~8 倍）。
+       只在**完整清洗**路径跑（讲完那一跳、coordOk 复检），所以是「讲完卡死几秒」而不是边讲边卡。 */
+    /* ★ 2026-10-15（审查补 · P2-16）：走 stripPercentClaims —— 没有 % 时整段跳过，
+       长度上界也压住了回溯（原来这条正则在纯数字串上要 4 秒）。 */
+    .replace(/[\s\S]*/, stripPercentClaims)
     /* ★ 推演变化图的残渣：像「5.X-R17」「78.O-J13」「X-D4」这种记谱 ——
        这是 LoGos 训练数据里的写法（X=黑 O=白，前面数字是第几手，后面是坐标）。
        ★★ 2026-10-13 改（首相报的「7一带」）：**不要整个删掉，只去掉 X-/O- 前缀**。
@@ -8192,6 +8365,12 @@ function resetCoachBtn(which) {
   /* ★ 全盘讲解期间不许点亮 —— 那两个按钮这时是灰的（防止插队抢通道），
      被这里的 finally 点亮就白挡了（2026-10-05 审查发现）。 */
   if (state.coach.batch) return;
+  /* ★ 2026-10-15（审查补 · P3-10）：**只重置「确实已经没人用了」的那个按钮**。
+     旧请求的 finally 若在新请求已经在跑时无条件点亮，按钮会闪一下「生成讲解」——
+     点击本身被 busy 挡住（没有功能损失），但看着像被取消了。
+     调用点都在「先复位 busy 标记、再调它」，所以判 busy 是否还挂着别人即可。 */
+  if (which === 'explain' && state.coach.busy.explain >= 0) return;
+  if (which === 'pick' && state.coach.busy.pick >= 0) return;
   const b = $(which === 'explain' ? 'btn-explain' : 'btn-pick');
   if (!b) return;
   b.disabled = false;
@@ -8205,8 +8384,16 @@ function resetCoachBtn(which) {
      ② 讲完第 6 手再点回第 2 手，第 2 手的讲解直接没了。
      现在每手各存一份，切到哪手显示哪份，没有就写「这一手还没有讲解」。 */
 let coachRenderedAt = -999;
+/* 一条路径的**纯数据**表示（可安全序列化 / 比较 / 存盘）。
+   ★★ 2026-10-15（审查补 · P0-1 / P3-12）：原来各处直接 `JSON.stringify(state.moves.slice(...))`，
+   而 moves 里装的是**树节点**（带 `_p` / `_cs`：子指父、父的 `_cs` 里又含子）→ **必然循环引用**，
+   `JSON.stringify` 当场抛 `TypeError: Converting circular structure to JSON`。
+   凡是需要「把一条路径变成可比较的值」的地方，一律走这里，别再直接 stringify 节点。 */
+function serializePath(at) {
+  return state.moves.slice(0, at).map(m => m.pass ? 'pass' : m.color + m.x + ',' + m.y);
+}
 function pickPositionKey(at) {
-  return JSON.stringify([N, settings.rules, settings.komi, state.setup, state.moves.slice(0, at)]);
+  return JSON.stringify([N, settings.rules, settings.komi, state.setup, serializePath(at)]);
 }
 function renderPickContext() {
   const rec = state.coach.pickPending || state.coach.pick;
@@ -8324,8 +8511,13 @@ async function runPickExplain() {
   body.textContent = '';
   body.appendChild(mkEl('div', 'src', '点由 KataGo 定 · 讲解由 LoGos 写 · 基于点击那一刻的推荐落点'));
   const btn = $('btn-pick');
-  state.coach.busy.pick = at;
+  /* ★★★ 2026-10-15（审查补 · P0-1）：**先算出快照，再置「忙」标记**。
+     原来 busy.pick 在 pickPositionKey **之前**就置了位，而后者会抛（循环引用，已修）：
+     异常飞出去时 busy.pick 还挂着 → 之后每次点击都被开头的
+     「正在讲，稍微等一下…」挡死，**功能永久报废、只能重启软件**。
+     顺序换过来之后，就算将来这里再抛别的异常，也只是这一次没反应，不会卡死。 */
   const snapshot = { at, side, positionKey: pickPositionKey(at), gen: gameGen };
+  state.coach.busy.pick = at;
   state.coach.pickPending = snapshot;
   renderPickContext();
   btn.disabled = true;
@@ -8352,12 +8544,17 @@ async function runPickExplain() {
       const prompt = coachPrompt(moves, board, side, pt);
       let r = await coachAsk(prompt, 320, typer);
       if (!r) break;                                   // 被新请求取代了 → 收工
+      /* ★ 2026-10-15（审查补 · P2-17）：**被中止的请求不能当完整讲解**。
+         另两处（分析讲解 / 全盘讲解）都判了 `r.aborted`，只有这里漏 ——
+         取消或卸载时半截文本会被当成完整讲解呈现出来，还会被存成快照。 */
+      if (r.aborted) { typer.finish('（已取消）'); break; }
       let txt = coachTextReady(r.text, pt, side);
       /* 坐标对不上（它讲的是别的点）→ 重来一次；再不行就**照原样给** ——
          内容本身一般还是有用的，给个空白反而更糟（实测约四次里出错一次）。 */
       if (!r.error && !coordOk(trimCoachTail(cleanCoachText(r.text)), pt)) {
         const r2 = await coachAsk(prompt, 320, typer);
         if (!r2) break;
+        if (r2.aborted) break;                        // ★ 同上：中止的半截文本不许采用
         /* ★ 复检必须用**没补前缀**的文本（2026-10-06 审查发现）：
            `coachTextReady` 会在开头补上「如果白棋下在<pt>，」，而 coordOk 抓的是
            前 18 字里第一个「字母+数字」—— 抓到的**永远是我们自己补的那个正确坐标**，
@@ -8838,8 +9035,8 @@ async function runBatchCoach() {
     const at = mainlineDivergenceAt();
     flash(at
       ? ('全盘讲解要站在主变上跑 —— 现在这条从**第 ' + at + ' 手**起就和主变不一样了。'
-        + '按 ↑/↓ 切回主变；或者按 PgUp 把现在这一支直接提为主变')
-      : '全盘讲解要站在主变上跑（现在这一条是分支）—— 按 PgUp 把这一支提为主变，或按 ↑/↓ 切回主变');
+        + '按 ↑/↓ 切回主变；或者在树面板上右键那颗珠子 →「设为主变」')
+      : '全盘讲解要站在主变上跑（现在这一条是分支）—— 右键树面板的珠子「设为主变」，或按 ↑/↓ 切回主变');
     return;
   }
   if (needEngine('coach', '全盘讲解')) return;
@@ -9012,6 +9209,16 @@ async function runBatchCoach() {
       if (batchStop || gen !== gameGen) break;
       const at = todo[i];
       const m = state.moves[at - 1];
+      /* ★★ 2026-10-15（审查补 · P2-15）：**越界守卫 + 不许静默中断**。
+         批量讲解要跑几分钟，期间用户回看落子会把路径截短（`state.moves.length = forked`），
+         而 todo 是发起时算好的 → `state.moves[at-1]` 变 undefined → 抛 TypeError 整轮中断；
+         偏偏失败提示写在 try 里面，异常一飞出去用户**什么提示都看不到**。
+         `gen !== gameGen` 拦不住这种情况 —— gameGen 只在退出试下 / 换谱时自增。 */
+      if (!m) {
+        batchStop = true;
+        flash('棋局在讲解期间变了（手数变短了）—— 这一轮停在已讲完的那一手');
+        break;
+      }
       const pt = m.pass ? '停一手' : toGTP(m.x, m.y);
       const sideTxt = m.color === 'b' ? '黑' : '白';
       const headTxt = '第 ' + at + ' 手 · ' + sideTxt + ' ' + pt;
