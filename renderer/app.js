@@ -867,8 +867,10 @@ function promoteToMainline(at) {
  *     删除分支  = 连子树整枝删掉。
  *
  * 两道保险（删的是用户辛苦摆出来的棋，不能一键就没）：
- *   ① **两段式确认**：第一次按 Delete 只登记并报「这一枝共几手」，再按一次才真删。
- *      不用弹窗 —— 弹窗是异步的，而这个操作要能在键盘上连按完成；
+ *   ① **入口处弹窗确认**（2026-10-15 首相要求改的）：右键菜单点「删除分支」→ 弹窗写清
+ *      「第几手起、共几手、能不能撤销」→【取消】/【删除】。真删时走 `{ force: true }`。
+ *      内核里**仍保留"两段式"作为兜底**：Delete 快捷键本轮已按首相要求删掉，
+ *      所以现在没有键盘入口走它；将来谁再挂一个新入口、忘记加 force，也不会"一键就删"。
  *      登记带 8 秒时效，超时或被别的操作打断就作废，免得"刚才那下"变成"现在这下"。
  *   ② **回收站**：真删之前把「父节点 + 原下标 + 节点本身」扣进 `branchTrash`，
  *      `Ctrl+Shift+Z` 原样放回（连下标位置都还原，不影响兄弟次序）。
@@ -884,7 +886,7 @@ function subtreeSize(node) {
   return n;
 }
 
-function deleteBranchAt(at) {
+function deleteBranchAt(at, opts) {
   if (state.draft) { flash('试下中不能删分支，先退出试下'); return false; }
   if (!(at > 0) || at > state.moves.length) { flash('先跳到要删的那一手'); return false; }
   ensureBranch();
@@ -893,8 +895,11 @@ function deleteBranchAt(at) {
   if (!parent) { flash('这一手没法删'); return false; }
   if (parent._cs.indexOf(node) < 0) { flash('这一手不在树上（是草稿手吗？）'); return false; }
 
-  /* 第一段：登记 + 报清楚要删多少 */
-  if (!pendingDel || pendingDel.node !== node || Date.now() - pendingDel.t > 8000) {
+  /* 第一段：登记 + 报清楚要删多少。
+     ★ 2026-10-15：`opts.force` 跳过这一段 —— 右键菜单已经改走「弹窗确认」，
+       弹窗里把"删哪一手、共几手、能不能撤销"写清楚了，这里就不必再来一次两段式
+       （两段式只在"键盘连按"那个交互下才需要，而 Delete 快捷键本轮已按首相要求删掉）。 */
+  if (!(opts && opts.force) && (!pendingDel || pendingDel.node !== node || Date.now() - pendingDel.t > 8000)) {
     const n = subtreeSize(node);
     pendingDel = { node, at, t: Date.now() };
     flash('再按一次 Delete：删掉第 ' + at + ' 手起的整条支（共 ' + n + ' 手）· 删完可按 Ctrl+Shift+Z 撤销');
@@ -1748,13 +1753,16 @@ function showTreeMenu(ev2, node) {
     if (!onMain) { gotoNode(node); promoteToMainline(depth); }
     closeTreeMenu();
   }, '把这一手所在的那条支提为主变（快捷键 PgUp）');
-  const delTxt = '删除分支（共 ' + subtreeSize(node) + ' 手）';
-  const del = item(delTxt, () => {
-    gotoNode(node);
-    const r = deleteBranchAt(depth);
-    if (r === false) { del.textContent = '再点一次确认删除'; }   // 内核两段式：第一次只登记
-    else closeTreeMenu();
-  }, '删掉这一手起的整枝（快捷键 Delete，两段式确认）');
+  /* ★ 2026-10-15（首相要求）：删除改成**弹窗确认**。
+     原来这里是"两段式"——点一次只把按钮文案变成「再点一次确认删除」、上方 flash 一句；
+     首相实测后明确要求："不弹是否确认删除的弹窗只在上方提醒一句，这不好，搞成确认弹窗和按钮"。
+     于是：点这一项 → 关菜单 → 弹窗（写清第几手、共几手、能不能撤销）→ 【取消】/【删除】。
+     ⚠️ 真删时走 `deleteBranchAt(depth, { force: true })`，跳过内核那段两段式登记。 */
+  const delN = subtreeSize(node);
+  item('删除分支（共 ' + delN + ' 手）', () => {
+    closeTreeMenu();
+    askDeleteBranch(node, depth, delN);
+  }, '删掉这一手起的整枝（会先弹窗确认；删完可用 Ctrl+Shift+Z 撤销）');
   if (branchTrash) {
     item('撤销刚才删除的分支', () => { undoDeleteBranch(); closeTreeMenu(); },
       '放回最近删掉的整枝（连原来的位置，快捷键 Ctrl+Shift+Z）');
@@ -1766,6 +1774,35 @@ function showTreeMenu(ev2, node) {
   menu.style.top = Math.min(ev2.clientY, window.innerHeight - mh - 6) + 'px';
 }
 function closeTreeMenu() { if (treeMenu) { treeMenu.remove(); treeMenu = null; } }
+
+/* 删除分支的确认窗（2026-10-15 首相要求：要看得见的问句 + 按钮，不能只 flash 一句）。
+   · 为什么不用 `confirm()`：Electron 里它是**阻塞原生框**，整个渲染进程会卡住（见 askBatchPlan 的注释）；
+   · 为什么不用 #batchask 那个通用窗：它被「全盘讲解」占着，那边有"正在用就不再重建"的保护，
+     借来用会互相打架 —— 删除是棋局操作，跟讲解流程不该共用同一个 DOM；
+   · ⚠️ 顺序：**先 gotoNode(node) 再删** —— 内核 deleteBranchAt 按"当前路径下标"取手。 */
+function askDeleteBranch(node, depth, n) {
+  const mask = $('delbranch');
+  if (!mask) {                                   // 兜底：万一弹窗元素没在（改了 HTML）就直接删
+    gotoNode(node);
+    return deleteBranchAt(depth, { force: true });
+  }
+  if (mask.classList.contains('open')) return;   // 连点两次不重入
+  const close = () => mask.classList.remove('open');
+  $('db-body').innerHTML =
+    '<p>确定删掉<b>第 ' + depth + ' 手</b>起的整条分支吗？</p>'
+    + '<p>这一枝一共 <b>' + n + '</b> 手（含它后面的全部变化）。</p>'
+    + '<p class="dim">删完可以按 <b>Ctrl+Shift+Z</b>、或再次右键点「撤销刚才删除的分支」放回来 —— '
+    + '连它原来的位置一起还原，不影响别的支。</p>';
+  $('db-ok').onclick = () => {
+    close();
+    gotoNode(node);
+    deleteBranchAt(depth, { force: true });
+  };
+  $('db-cancel').onclick = close;
+  mask.onclick = e => { if (e.target === mask) close(); };   // 点遮罩空白处 = 取消（与其它弹窗一致）
+  mask.classList.add('open');
+  if ($('db-cancel').focus) $('db-cancel').focus();
+}
 document.addEventListener('click', closeTreeMenu);
 
 /* 面板接线：滚动重画 + 点珠跳转 + ▾ 折叠 + ★悬停浮层 + ★右键平移画布 */
@@ -6811,7 +6848,16 @@ window.addEventListener('keydown', e => {
     if (e.code === 'KeyZ') { e.preventDefault(); $('btn-undo').click(); }
     return;
   }
-  /* 开关类快捷键统一带一句提示（这些键容易误触，而「东西突然没了」的第一嫌疑就是它）。
+  /* ★★ 2026-10-15 首相要求「检索一遍所有按键，细碎没用的删掉，显示开关这类刚需不能删」——
+     本轮**删掉三个**（都是"用得上但没必要占一个键"的，操作在界面上都有）：
+       · `Delete`  删除分支  → 右键树面板的珠子就有一项，而且现在还会弹窗确认；
+       · `空格`    停一手    → 停一手本来就不常用，底栏那个按钮点一下的事；
+       · `PageUp`  提升主变  → 同一个右键菜单里就有。
+     为什么删而不是留：键位是稀缺资源，用得越少越不会被误触；
+     而且这三个都属于"改棋谱结构"的操作，走菜单/按钮 + 确认更稳妥（尤其 Delete 之前是两段式，容易误删）。
+     留下来的判断标准：**频率高**（前后翻手、换分支、悔棋）或**不影响数据、随手开关**（显示项）。
+
+     开关类快捷键统一带一句提示（这些键容易误触，而「东西突然没了」的第一嫌疑就是它）。
      键位（2026-10-04 用户指定）：T 推荐点 · Z 坐标 · M 手数 · Y 音效 · X 形势 · N 拟人落子 · D 试下。
      ⚠️ 改键位时**记得同步 index.html 里各开关名字后面的括号**，以及 title 提示。 */
   switch (e.code) {
@@ -6820,9 +6866,6 @@ window.addEventListener('keydown', e => {
     /* ★ 手数分支（2026-10-13）：↑ / ↓ 在「当前看到这一点」换分支（同一点的不同走法） */
     case 'ArrowUp':    e.preventDefault(); cycleBranch(-1); break;
     case 'ArrowDown':  e.preventDefault(); cycleBranch(1); break;
-    /* ★ 提升主变（2026-10-13，设计方案段② 第 4 条 / 决策 8）：PgUp。
-       把「当前看到的这一手」所在的那条支整个提为主变（原主变退成旁支，整枝不丢）。 */
-    case 'PageUp':     e.preventDefault(); promoteToMainline(state.viewAt); break;
     /* ★ 段③ 树面板（2026-10-13）：C 展开/收起「当前这一手」的侧支（主变那条不动）。
        施工单的"回上一岔口 b 键"和现有「变化图（B）」撞车 —— 不改别人的键，
        也不自创键位：树面板点任意胶囊即可跳转，↑↓ 已覆盖换分支，b 暂不绑（已登记冲突）。 */
@@ -6832,13 +6875,8 @@ window.addEventListener('keydown', e => {
         toggleTreeExpand(state.moves[state.viewAt - 1]);
       }
       break;
-    /* ★ 删除分支（2026-10-13，设计方案决策 7/8）：Delete 两段式 ——
-       第一次登记并报「这一枝共几手」，再按一次才真删；删完 Ctrl+Shift+Z 可撤销。
-       与「悔棋」（Ctrl+Z）是两件事：悔棋只删当前节点，永不顺带删除其它旁支。 */
-    case 'Delete':     e.preventDefault(); deleteBranchAt(state.viewAt); break;
     case 'Home':       e.preventDefault(); $('btn-first').click(); break;
     case 'End':        e.preventDefault(); $('btn-last').click(); break;
-    case 'Space':      e.preventDefault(); $('btn-pass').click(); break;
     case 'KeyT': {
       const c = $('chk-show'); c.checked = !c.checked; c.onchange({ target: c });
       flash(c.checked ? '已显示推荐点' : '已隐藏推荐点（再按 T 恢复）');
