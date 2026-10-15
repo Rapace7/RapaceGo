@@ -1,4 +1,13 @@
 /* 段③ 水平分叉树面板的回归断言 —— 2026-10-13 千问写的；同日下午改「珍珠手串」画法后同步更新。
+ *
+ * ★ 2026-10-15 同步过四处（都是**脚本自身过时**，与功能对错无关）：
+ *   ① cellOf 现在是"先滚到目标列再查"（树虚拟化，窗口窄时珠子不在渲染范围 → 原来会崩）；
+ *   ② ⑤ 组点旁支珠子前要先**展开侧支**（10-14 起默认收起，收起时旁支不在 treeCells 里）；
+ *   ③ ⑥ 组按**当前折叠语义**重写（默认收起、C = 展开；旧的 treeCollapsed 集合已不存在，
+ *      现在是一对 treeExpanded / treeForceOpen，对外走 treeIsOpen()）；
+ *   ④ ③A3 的阈值 2 → 1（侧支连线从"肘形两段"改成"一条斜线"之后，一条侧支就是一条 .ln-br）。
+ *   背景：这套脚本里的符号是**直接读 app.js 内部**的，界面一改就容易过时 ——
+ *   下一个人再遇到它崩，先按这四条对一遍，别先怀疑功能。
  * 用法：双击 dev\_start_cdp.bat 起实例，再 node dev/_cdp_run2.mjs ./_inject_tree_v1.js 9333
  *
  * 原则：**尽量走真实 DOM 事件**（点滑杆、点珠子、右键、悬停、拖动），不是只调函数 ——
@@ -14,7 +23,27 @@
   const ok = (n, c, g) => L.push((c ? 'PASS ' : 'FAIL ') + n + (g === undefined ? '' : '  [' + g + ']'));
   const G = s => { const m = /^([A-HJ-T])(\d+)$/.exec(s); return { x: GTP_COLS.indexOf(m[1]), y: 19 - parseInt(m[2], 10) }; };  // 坑28：走 GTP_COLS，别 charCodeAt
   const capAt = (d, r) => document.querySelector(`#branch-tree .cap[data-d="${d}"][data-r="${r}"]`);
-  const cellOf = n => treeCells.find(c => c.node === n);
+  /* ★ 2026-10-15 修（这个脚本本身的问题，不是软件的问题）：
+     树是**虚拟化**的 —— 只渲染滚动窗口内的那几列。窗口一窄，要找的珠子就不在窗口里，
+     capAt() 拿到 null、后面读 `.depth` 直接抛异常（实测：dev 实例 1444 宽时第 ⑤ 组必崩；
+     把源码退回上一版原样重跑同样崩，可见与功能改动无关）。
+     现在 cellOf 先**把目标列滚进视野**再返回，DOM 里查不到才说明真的没有。
+     ⚠️ 滚动事件→treePaint 是异步的（走 requestAnimationFrame），所以这里同步补画一次，
+        否则紧接着的 capAt() 仍会拿到 null。 */
+  const cellOf = n => {
+    const c = treeCells.find(x => x.node === n);
+    if (!c) return undefined;                       // 布局里就没这个节点 → 真异常，别掩盖
+    if (capAt(c.depth, c.row)) return c;            // 已经在渲染窗口内
+    const box = $('branch-tree');
+    if (box && !box.hidden) {
+      const target = Math.max(0, stoneX(c.depth) - Math.floor(box.clientWidth / 2));
+      if (Math.abs(box.scrollLeft - target) > 1) {
+        box.scrollLeft = target;
+        treePaint();
+      }
+    }
+    return c;
+  };
 
   /* ---------- 摆一个「主线 5 手 + 旁支 2 手」的局面 ---------- */
   settings.mode = 'free'; settings.size = 19; settings.handicap = 0; settings.rules = 'chinese';
@@ -71,8 +100,13 @@
   const b2c = cellOf(bk2Node);
   ok('③A2 当前走的旁支珠子**没有**金圈（还没提为主变）',
      !!b2c && !capAt(b2c.depth, b2c.row).classList.contains('main'));
-  ok('③A3 侧支的连线画出了肘形分线（.ln-br 存在）',
-     document.querySelectorAll('#branch-tree .ln-br').length >= 2,
+  /* ★ 2026-10-15 改（阈值 2 → 1）：这个局面的侧支**只有一个起头**。
+     · 10-14 晚把侧支连线从"垂直下落 + 水平接入"改成了**一条斜线**，肘形两段并成一段；
+     · 树又改成默认收起、按需展开。
+     于是"1 条侧支起头"就是 1 条 .ln-br —— 旧阈值 2 是早先画法的口径，与对错无关。
+     断言要守的性质其实是「**侧支的连线确实画出来了**」，所以判 >= 1。 */
+  ok('③A3 侧支的连线画出来了（.ln-br 存在）',
+     document.querySelectorAll('#branch-tree .ln-br').length >= 1,
      document.querySelectorAll('#branch-tree .ln-br').length);
 
   /* ---------- 4) 当前手青环（与金圈互斥，靠 CSS 顺序覆盖） ---------- */
@@ -85,7 +119,14 @@
   /* ---------- 5) 点旁支珠 → 跳到那条支（点哪看哪） ---------- */
   gotoView(3); await sleep(50); cycleBranch(1); await sleep(200);   // 切回旧线（主变）
   ok('⑤A 前置：切回旧线（5 手）', state.moves.length === 5, state.moves.length);
+  /* ★ 2026-10-15：树从 10-14 晚起改成「**默认收起、按需展开**」（首相定的）——
+     切回旧线时旁支是**收起**的，旁支那颗珠子根本不在 treeCells 里（cellOf 返回 undefined，
+     下一步读 .depth 就崩）。所以先把这个分叉点的侧支展开，再去找珠子。
+     ⚠️ 这正是"界面行为变了、断言没跟着变"的典型：脚本写于 10-13（那时默认展开）。
+        与软件功能无关 —— 老脚本在这台机器上崩，退回旧源码也一样崩。 */
+  toggleTreeExpand(state.moves[2]); await sleep(220);
   const k5 = cellOf(bkNode);
+  ok('⑤A2 展开分叉点的侧支后，旁支珠子才在布局里（默认收起是 10-14 起的行为）', !!k5);
   capAt(k5.depth, k5.row).click(); await sleep(260);
   ok('⑤B 点旁支珠 → 跳到那条支并走到末端（5 手，末手 L10）',
      state.moves.length === 5 && state.moves[4].x === bk2.x,
@@ -94,19 +135,29 @@
   ok('⑤C 点的那一手（K10）亮起青环（点哪看哪：viewAt 停在被点的珠）',
      !!kNow && capAt(kNow.depth, kNow.row).classList.contains('cur'), 'viewAt=' + state.viewAt);
 
-  /* ---------- 6) C 键折叠分叉点的侧支 ---------- */
+  /* ---------- 6) C 键折叠 / 展开分叉点的侧支 ----------
+     ★ 2026-10-15 改：折叠语义在 10-14 晚**反转**过（首相定的「默认收起、按需展开」）——
+       老脚本写的是「默认展开、按 C 收起」，它引用的 `treeCollapsed` 这个集合也已经不存在
+       （现在是一对集合 treeExpanded / treeForceOpen，对外统一走 treeIsOpen()）。
+       所以这一组按**当前语义**重写：先归零 → 断言默认收起 → 按 C 展开 → 再按 C 收起。
+       ⚠️ 这正是"界面行为变了、断言没跟着变"，跟软件功能对错无关。 */
   const forkParent = state.moves[2];
   gotoView(3); await sleep(80);
-  document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true }));
-  await sleep(200);
+  treeExpanded.delete(forkParent); treeExpandSeq.delete(forkParent);   // 归零：确保从"收起"开始
+  renderMoveTree(); await sleep(180);
   const inCells = n => treeCells.some(c => c.node === n);
-  ok('⑥1 按 C 后侧支从布局里消失（只剩主线 5 手）',
+  ok('⑥1 默认收起：侧支不在布局里（只剩主线 5 手）',
      treeCells.length === 5 && !inCells(bkNode) && !inCells(bk2Node), treeCells.length + ' 格');
-  ok('⑥2 分叉点进了折叠集', treeCollapsed.has(forkParent));
-  ok('⑥3 折叠的珠带 +n 角标', !!capAt(cellOf(forkParent).depth, 0) && /\+1/.test(capAt(cellOf(forkParent).depth, 0).textContent));
+  ok('⑥2 收起状态：treeIsOpen(分叉点) 为假', !treeIsOpen(forkParent));
+  const fCell = cellOf(forkParent);
+  const fCap = fCell && capAt(fCell.depth, fCell.row);
+  ok('⑥3 收起的珠带 +n 角标', !!fCap && /\+1/.test(fCap.textContent), fCap ? fCap.textContent : 'null');
   document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true }));
-  await sleep(200);
-  ok('⑥4 再按 C 展开回来', inCells(bkNode) && inCells(bk2Node) && !treeCollapsed.has(forkParent));
+  await sleep(220);
+  ok('⑥4 按 C 展开：侧支回到布局里', inCells(bkNode) && inCells(bk2Node) && treeIsOpen(forkParent));
+  document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true }));
+  await sleep(220);
+  ok('⑥5 再按 C 收起', !inCells(bkNode) && !inCells(bk2Node) && !treeIsOpen(forkParent));
 
   /* ---------- 7) 原地右击弹菜单 / 右键拖动=平移（首相定的两条路） ---------- */
   /* 先做「平移」：内容窄于窗口时先塞够列（临时把窗口滚不动也行 —— 这里用 24 手长谱测） */
