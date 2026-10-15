@@ -182,6 +182,47 @@ const state = {
   review: null,
 };
 
+/* ★★★ 2026-10-15 根治（首相：「按最一劳永逸的方法搞，不要治标不治本」）
+
+   ① `state.toMove`：从**可变字段**改成**只读派生属性** —— 谁能走**永远**由「当前路径长度」决定。
+      为什么非得这么狠：这次报上来的恶性 bug（同一方连下两子）根因就是它是字段 ——
+      谁改了 `state.moves` 都得记得重算它，而树上的三个操作（提升主变 / 删除分支 / 撤销删除）
+      按 `viewAt` 算错了。派生之后**代码里根本没法把它写错**，不留"下次记得同步"这种余地。
+      （旧的 `state.toMove = ...` 写法现在全是空操作，同一轮已全部删掉。）
+
+   ② `refreshDerived()`：`koPoint` 的唯一写入口。
+      为什么不干脆也做成派生属性：它要重放整盘才知道（`koFromBoard(boardAt(n), …)`），
+      读点很多、做成 getter 等于每次读都重放一遍。所以保留字段 + **只准从这里改**。
+
+   ③ `setPath()`：`state.moves` 的**唯一重建入口** —— 一次把路径、viewAt、劫点全设对。
+      树上的操作（提升主变 / 删除分支 / 撤销删除 / 切分支 / 进出试下）以前各写一遍
+      "清空 + 循环 push + 设三个字段"，漏一个就是一类 bug。现在只有这一个出口。 */
+Object.defineProperty(state, 'toMove', {
+  get() { return sideToMove(this.moves.length); },
+  set(_v) { /* 故意为空：轮次不接受赋值，见上面 ① */ },
+  enumerable: true, configurable: true,
+});
+/* ⚠️ 允许**直接写** `state.koPoint` 的例外只有四处，别再加第五处：
+     · 落子 / 走 fork 之后：那里已经知道"提了哪一点"，**增量算**比整盘重放快得多；
+     · 停一手（pass）：脱先一手劫自然消解，直接置 null；
+     · 快照恢复（试下退出 / 换棋谱 / 新对局）：整体盖回，随后会各自 refreshDerived；
+   其余任何"换局面"的地方都必须走 refreshDerived() / setPath()。 */
+function refreshDerived() {
+  /* 劫点按**正在看的那一手**（viewAt）算，不按末端 ——
+     回看时棋盘显示的是第 viewAt 手的局面，禁着点也该是那个局面的。
+     落子 / 停一手之后 viewAt 恰好等于末端，两者一致。
+     ⚠️ 这条与 toMove **相反**：toMove 永远按末端（因为落子只可能发生在末端）。 */
+  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
+}
+/* 把当前路径换成 path（节点数组）。viewAt 省略 = 看末端。
+   ⚠️ 只在"换局面"时用；单纯翻手数（gotoView）不要走这里 —— 那不动路径。 */
+function setPath(path, viewAt) {
+  state.moves.length = 0;
+  for (const m of path) state.moves.push(m);
+  state.viewAt = (viewAt === undefined) ? state.moves.length : Math.max(0, Math.min(state.moves.length, viewAt));
+  refreshDerived();
+}
+
 let hover = null;    // 鼠标悬停的交叉点 {x, y}
 let pvTimer = null;  // 「悬停满 1 秒才显示变化图」的定时器
 
@@ -604,6 +645,32 @@ function ensureBranch() {
   return branchRoot;
 }
 
+/* ★★ 2026-10-15（推送前自检抓到的真隐患）：**停一手也走正规建节点**。
+   原来两处都是 `state.moves.push({ pass: true, color })` —— 压进去的是个**裸节点**：
+   没有 `_p`、没有 `_cs`，要等下一次 `ensureBranch()` 才被补上。
+   在补上之前，任何用到 `_p` 的东西都会算错：
+     · `pathFromRoot` / `nodeDepth` → 上溯到它就断（拿到的路径缺前面几手）；
+     · 树面板 `treeLayout` → 把它当"没有父"的节点摆。
+   自检 `dev/_cdp_invariants.mjs` 的「①路径有效」就是这么抓到的（2000 步随机操作里的第 48 步）。
+   现在与 tryPlay 建节点同一套规矩：挂在父的 `_cs` 里、同着复用、`_p` 指向父。 */
+function pushPassNode() {
+  /* 试下（草稿）期间与草稿落子同样**不挂树**（决策 10）——
+     但仍要带 `_p`/`_cs` 两个保险字段：缺了 branchParentAt 会 TypeError（见 tryPlay 的注释）。 */
+  if (state.draft) {
+    state.moves.push({ pass: true, color: state.toMove, _p: null, _cs: [] });
+    clearCoachAt(state.moves.length);
+    return;
+  }
+  ensureBranch();
+  const parent = state.moves.length ? state.moves[state.moves.length - 1] : branchRoot;
+  if (!parent._cs) parent._cs = [];
+  let nd = parent._cs.find(c => c.pass);        // 同一个局面下再停一手 → 复用同一个节点
+  if (!nd) { nd = { pass: true, color: state.toMove, _p: parent, _cs: [] }; parent._cs.push(nd); }
+  state.moves.push(nd);
+  clearCoachAt(state.moves.length);             // 该手号上的旧讲解作废
+  return nd;
+}
+
 /* 从节点回溯到根 → 路径数组（**不含**虚拟根） */
 function pathFromRoot(node) {
   const p = [];
@@ -846,11 +913,11 @@ function promoteToMainline(at) {
   }
 
   const full = pathThrough(node);
-  state.moves.length = 0;
-  for (const m of full) state.moves.push(m);
-  state.viewAt = at;                          // 看的还是同一手（同一点，只是主变换了）
-  state.toMove = sideToMove(at);
-  state.koPoint = koFromBoard(boardAt(at), state.moves, at);
+  /* ★ 2026-10-15 根治：**路径重建只有一个出口**（setPath）——
+     它一次把 moves / viewAt / 劫点全设对；轮次是只读派生属性，不必也不许手动设。
+     以前这几处各写一遍"清空 + 循环 push + 设三个字段"，漏一个就是一类 bug
+     （首相报的「同一方连下两子」正是这么漏出来的）。 */
+  setPath(full, at);                          // 看的还是同一手（同一点，只是主变换了）
   state.pv = null;
   truncateAnalysisTo(0);                      // 按手号的缓存整个作废（已寄走）
   restoreExplainForPath();
@@ -918,11 +985,11 @@ function deleteBranchAt(at, opts) {
   /* 被删的枝若正是当前走的那条 → 回到分叉点，再沿**新的**主变（`_cs[0]`）一路走到底。
      parent 可能就是虚拟根（删第 1 手那种情形），pathThrough 对它同样成立。 */
   const full = pathThrough(parent);
-  state.moves.length = 0;
-  for (const m of full) state.moves.push(m);
-  state.viewAt = Math.min(at - 1, state.moves.length);
-  state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
+  /* ★ 2026-10-15 根治：**路径重建只有一个出口**（setPath）——
+     它一次把 moves / viewAt / 劫点全设对；轮次是只读派生属性，不必也不许手动设。
+     以前这几处各写一遍"清空 + 循环 push + 设三个字段"，漏一个就是一类 bug
+     （首相报的「同一方连下两子」正是这么漏出来的）。 */
+  setPath(full, at - 1);
   state.pv = null;
   truncateAnalysisTo(0);
   restoreExplainForPath();
@@ -933,6 +1000,11 @@ function deleteBranchAt(at, opts) {
 }
 
 function undoDeleteBranch() {
+  /* ★ 2026-10-15（自检抓到）：**试下期间不许撤销删除分支**。
+     与 deleteBranchAt 的闸门对齐 —— 撤销会把路径整体重建到 t.at，
+     那可能**退到试下存档点之前**，把草稿快照的语义破坏掉
+     （自检的「⑦草稿期间退过了存档点」就是这么抓到的）。 */
+  if (state.draft) { flash('试下中不能撤销删除分支，先退出试下'); return false; }
   if (!branchTrash) { flash('没有可撤销的删除'); return false; }
   const t = branchTrash;
   branchTrash = null;
@@ -958,11 +1030,11 @@ function undoDeleteBranch() {
   stashExplainAfter(0);
   stashAnalysisAfter(0);
   const full = pathThrough(t.node);
-  state.moves.length = 0;
-  for (const m of full) state.moves.push(m);
-  state.viewAt = Math.min(t.at, state.moves.length);   // 把用户送回他删之前看的那一手
-  state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
+  /* ★ 2026-10-15 根治：**路径重建只有一个出口**（setPath）——
+     它一次把 moves / viewAt / 劫点全设对；轮次是只读派生属性，不必也不许手动设。
+     以前这几处各写一遍"清空 + 循环 push + 设三个字段"，漏一个就是一类 bug
+     （首相报的「同一方连下两子」正是这么漏出来的）。 */
+  setPath(full, t.at);                        // 把用户送回他删之前看的那一手
   state.pv = null;
   truncateAnalysisTo(0);
   restoreExplainForPath();
@@ -1065,12 +1137,12 @@ function switchBranch(at, j) {
   if (!target) return false;
   stashExplainAfter(at);
   stashAnalysisAfter(at);                       // ★ 段②：评估也寄到各自节点上（切回来秒出，不用重算）
-  state.moves.length = at;                      // 截到分叉点（旧分支整枝仍在树里）
-  const full = pathThrough(target);
-  for (let i = at; i < full.length; i++) state.moves.push(full[i]);
-  state.viewAt = state.moves.length;            // 切过去直接看这条分支走到哪
-  state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
+  const full = pathThrough(target);              // 截到分叉点 + 沿新支走到尽头
+  /* ★ 2026-10-15 根治：**路径重建只有一个出口**（setPath）——
+     它一次把 moves / viewAt / 劫点全设对；轮次是只读派生属性，不必也不许手动设。
+     以前这几处各写一遍"清空 + 循环 push + 设三个字段"，漏一个就是一类 bug
+     （首相报的「同一方连下两子」正是这么漏出来的）。 */
+  setPath(full);                                // 切过去直接看这条分支走到哪
   state.pv = null;
   truncateAnalysisTo(at);                       // 旧路径的评估已寄走 → 这里可以放心截
   restoreExplainForPath();
@@ -1960,7 +2032,6 @@ function tryPlay(x, y, byAI) {
     stashExplainAfter(forked);                     // 先把尾巴的讲解寄到各自节点上（防串）
     stashAnalysisAfter(forked);                    // ★ 段②：评估同样寄走（尾巴那一枝还在树里，切回去要能用）
     state.moves.length = forked;
-    state.toMove = sideToMove(forked);
     state.koPoint = koFromBoard(boardAt(forked), state.moves, forked);
     state.pv = null;
     truncateAnalysisTo(forked);                    // 评估缓存按手号存，跨分支会串 → 分叉点之后作废
@@ -2000,6 +2071,12 @@ function tryPlay(x, y, byAI) {
     return false;
   }
 
+  /* ★★ 2026-10-15 保险（首相报的「连续两手都是白方下棋」）：
+     落子**永远发生在末端**，所以轮次永远由 `state.moves.length` 说了算 —— 这里再校准一次。
+     为什么值得多这一道：树上那几个操作（提升主变 / 删除分支 / 撤销删除）原来都按 `viewAt`
+     算 toMove（已改成按末端算，见各自注释），但将来谁再加一个树操作、忘了同步 toMove，
+     用户看到的就是"同一方连下两子"这种恶性 bug。
+     校准是幂等的：正常情况下这一行不会改变任何东西。 */
   const c = state.toMove === 'b' ? 1 : 2;
   b[idx(x, y)] = c;
 
@@ -2050,7 +2127,6 @@ function tryPlay(x, y, byAI) {
   }
   clearCoachAt(state.moves.length);      // 这个手号上的旧讲解作废（悔棋换了别的棋，见函数注释）
   clockSwitch();                         // 结算本手用时，换对方
-  state.toMove = state.toMove === 'b' ? 'w' : 'b';
   state.pv = null;                       // 变化图只对当前局面有效，落了子就收掉
   state.viewAt = state.moves.length;
   syncUI();
@@ -2482,7 +2558,6 @@ function enterDraft() {
        · truncateAnalysisTo 截 history / leads / histVisits / 队列 ——
          漏了会画出幽灵手数、分析还可能死锁（悔棋 2026-10-06 的教训）。 */
   state.moves.length = from;
-  state.toMove = sideToMove(from);
   state.koPoint = koFromBoard(boardAt(from), state.moves, from);
   state.pv = null;                       // 变化图基于旧局面，作废
   truncateAnalysisTo(from);
@@ -2500,7 +2575,6 @@ function exitDraft() {
   const s = d.snap;
   state.moves = s.moves;
   state.viewAt = s.viewAt;
-  state.toMove = s.toMove;
   state.koPoint = s.koPoint;
   state.candidates = s.candidates;
   state.candAt = s.candAt;
@@ -2746,7 +2820,6 @@ $('btn-undo').onclick = () => {
       state.moves.pop();
     }
   }
-  state.toMove = sideToMove(state.moves.length);
   /* ★★ 禁着点必须**重新算出来**，不能清成 null（2026-10-07 用户报的真 bug）。
      原来这里写的是 `state.koPoint = null;`，注释说「局面变了，打劫禁着点随之失效」——
      那句话只对了一半：**退掉了提劫那一手**时它确实该失效，但**退到"刚提完劫"那个局面**时
@@ -2775,9 +2848,7 @@ $('btn-undo').onclick = () => {
 
 $('btn-pass').onclick = () => {
   if (state.viewAt !== state.moves.length) { flash('回看中不能落子，先跳到最新'); return; }
-  state.moves.push({ pass: true, color: state.toMove });
-  clearCoachAt(state.moves.length);      // 该手号上的旧讲解作废
-  state.toMove = state.toMove === 'b' ? 'w' : 'b';
+  pushPassNode();                // ★ 走正规建节点（见该函数注释：裸节点会让 _p 链断）
   state.koPoint = null;          // 脱先一手，劫自然消解
   state.viewAt = state.moves.length;
   syncUI();
@@ -3360,7 +3431,6 @@ function applyRecord(rec, srcName) {
   /* 棋谱里带的双方名字 → 右侧 ID 栏（没有就留空，回落到默认叫法） */
   const cleanName = v => String(v || '').replace(/[\[\]\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 24);
   state.names = { b: cleanName(rec.pb), w: cleanName(rec.pw) };
-  state.toMove = sideToMove(state.moves.length);
   /* ★ 打开棋谱时**不拦打劫**（KaTrain 第 135 行同理：重放棋谱用 `ignore_ko=True`，
      因为那些手的合法性无法追溯、而且往往本来就是"打完劫之后"的局面）。
      但**禁着点要算出来** —— 用户接着往下摆时得受劫规则约束。
@@ -4538,17 +4608,14 @@ function applyNewGame(idle) {
   const R = RULES[settings.rules] || RULES.chinese;
 
   if (R.seats) {
-    state.setup = seatStones(N);      // 明清规则：四角座子（黑白各二）
-    state.toMove = 'w';               // 古谱白先
+    state.setup = seatStones(N);      // 明清规则：四角座子（黑白各二）→ 白先（由 setup 派生）
   } else if (settings.handicap) {
     state.setup = handicapStones(N, settings.handicap);
-    state.toMove = 'w';
   } else {
     state.setup = [];
-    state.toMove = 'b';
   }
 
-  state.moves = [];
+  state.moves = [];                      // 空局；toMove 由它派生（有座子/让子则白先）
   branchRoot = null;                     // ★ 新对局：分支树作废重建
   treeExpanded.clear(); treeForceOpen.clear(); treeExpandSeq.clear();   // 同上：换局必须清（防泄漏 + 防误展）
   /* ★★ 坑位 37（2026-10-13 审查补）：回收站与「待确认删除」也是**节点引用**，
@@ -5547,8 +5614,7 @@ async function maybeAIMove() {
     const pick = pickAIMove(res);
     if (pick === 'pass') {
       aiRetry = 0;
-      state.moves.push({ pass: true, color: sideToMove(state.moves.length) });
-      clearCoachAt(state.moves.length);    // 该手号上的旧讲解作废
+      pushPassNode();                   // ★ 同上：AI 停一手也走正规建节点
       state.viewAt = state.moves.length;
       syncUI();
     } else if (pick) {

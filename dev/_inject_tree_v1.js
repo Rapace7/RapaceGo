@@ -179,8 +179,19 @@
   ok('⑦3 拖动结束后 pan 状态已复位', box.classList.contains('panning') === false);
   /* 原地右击（按下没移动）→ 才弹菜单 */
   box.scrollLeft = 0; await sleep(120);
-  const bkCell2 = cellOf(bkNode);   // K10 这颗现在被滚出窗口了？24手窗口够宽就还在 —— 先滚回 0，K10 在第 4 列，一定可见
-  if (!capAt(bkCell2.depth, bkCell2.row)) { ok('⑦4 前置：K10 珠在窗口内', false); }
+  /* ★ 2026-10-15：这里**自己保证前提**，不依赖前面几组留下的状态 ——
+     ⑥ 组按"当前折叠语义"重写之后，它结束时侧支是**收起**的，
+     于是 K10 根本不在 treeCells 里、cellOf 拿不到它（⑦4 因此红过一次）。
+     展开分叉点 + 把目标列滚进视野，这两件事在这里显式做。 */
+  if (!treeIsOpen(forkParent)) { toggleTreeExpand(forkParent); await sleep(220); }
+  let bkCell2 = cellOf(bkNode);
+  if (!bkCell2 || !capAt(bkCell2.depth, bkCell2.row)) {
+    if (bkCell2) { box.scrollLeft = Math.max(0, stoneX(bkCell2.depth) - 20); treePaint(); await sleep(120); }
+    bkCell2 = cellOf(bkNode);
+  }
+  if (!bkCell2 || !capAt(bkCell2.depth, bkCell2.row)) {
+    ok('⑦4 前置：K10 珠在窗口内', false, bkCell2 ? ('cell ' + bkCell2.depth + ',' + bkCell2.row) : 'cellOf=undefined');
+  }
   else {
     capAt(bkCell2.depth, bkCell2.row).dispatchEvent(new MouseEvent('mousedown', { button: 2, clientX: 300, clientY: 300, bubbles: true }));
     capAt(bkCell2.depth, bkCell2.row).dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 300, bubbles: true, cancelable: true }));

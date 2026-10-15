@@ -1,0 +1,1 @@
+(() => { try { return JSON.stringify({ toMove: state.toMove, moves: state.moves.length, viewAt: state.viewAt, hasGet: !!Object.getOwnPropertyDescriptor(state,'toMove').get, setPath: typeof setPath, refreshDerived: typeof refreshDerived }); } catch (e) { return 'ERR ' + e.message; } })()
