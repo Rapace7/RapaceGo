@@ -482,18 +482,21 @@ function draw() {
     }
   }
 
-  // 落子预览小方块：悬停空点、轮到我下、且 AI 没在思考时显示
-  if (hover && state.viewAt === state.moves.length && !state.thinking &&
-      b[idx(hover.x, hover.y)] === 0) {
+  // 落子预览小方块：悬停空点、AI 没在思考时显示
+  if (hover && !state.thinking && b[idx(hover.x, hover.y)] === 0) {
     const [hx, hy] = pxOf(hover.x, hover.y);
     const side = gap * 0.46, half = side / 2, rr = gap * 0.08;
     const isBlack = state.toMove === 'b';
-    ctx.globalAlpha = isBlack ? 0.58 : 0.80;
+    /* ★ 2026-10-15：**回看中也画**，但压到 45% 透明度、并且一律描边 ——
+       点下去是从这里**开新分支**（不是接着往下走），跟正常落子区分开。
+       原来这里是"回看中整个不画"，首相看到的就是"预览方块没了"，见 mousemove 里的注释。 */
+    const 回看中 = state.viewAt !== state.moves.length;
+    ctx.globalAlpha = (isBlack ? 0.58 : 0.80) * (回看中 ? 0.45 : 1);
     ctx.fillStyle = isBlack ? '#1b1b1a' : '#ffffff';
     roundRect(hx - half, hy - half, side, side, rr);
     ctx.fill();
     ctx.globalAlpha = 1;
-    if (!isBlack) {
+    if (!isBlack || 回看中) {
       ctx.strokeStyle = 'rgba(120,115,105,.6)';
       ctx.lineWidth = 1;
       roundRect(hx - half, hy - half, side, side, rr);
@@ -847,7 +850,7 @@ function promoteToMainline(at) {
   for (const m of full) state.moves.push(m);
   state.viewAt = at;                          // 看的还是同一手（同一点，只是主变换了）
   state.toMove = sideToMove(at);
-  state.koPoint = koFromBoard(boardAt(at), state.moves);
+  state.koPoint = koFromBoard(boardAt(at), state.moves, at);
   state.pv = null;
   truncateAnalysisTo(0);                      // 按手号的缓存整个作废（已寄走）
   restoreExplainForPath();
@@ -914,7 +917,7 @@ function deleteBranchAt(at) {
   for (const m of full) state.moves.push(m);
   state.viewAt = Math.min(at - 1, state.moves.length);
   state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves);
+  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
   state.pv = null;
   truncateAnalysisTo(0);
   restoreExplainForPath();
@@ -954,7 +957,7 @@ function undoDeleteBranch() {
   for (const m of full) state.moves.push(m);
   state.viewAt = Math.min(t.at, state.moves.length);   // 把用户送回他删之前看的那一手
   state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves);
+  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
   state.pv = null;
   truncateAnalysisTo(0);
   restoreExplainForPath();
@@ -1062,7 +1065,7 @@ function switchBranch(at, j) {
   for (let i = at; i < full.length; i++) state.moves.push(full[i]);
   state.viewAt = state.moves.length;            // 切过去直接看这条分支走到哪
   state.toMove = sideToMove(state.viewAt);
-  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves);
+  state.koPoint = koFromBoard(boardAt(state.viewAt), state.moves, state.viewAt);
   state.pv = null;
   truncateAnalysisTo(at);                       // 旧路径的评估已寄走 → 这里可以放心截
   restoreExplainForPath();
@@ -1921,7 +1924,7 @@ function tryPlay(x, y, byAI) {
     stashAnalysisAfter(forked);                    // ★ 段②：评估同样寄走（尾巴那一枝还在树里，切回去要能用）
     state.moves.length = forked;
     state.toMove = sideToMove(forked);
-    state.koPoint = koFromBoard(boardAt(forked), state.moves);
+    state.koPoint = koFromBoard(boardAt(forked), state.moves, forked);
     state.pv = null;
     truncateAnalysisTo(forked);                    // 评估缓存按手号存，跨分支会串 → 分叉点之后作废
   }
@@ -1936,9 +1939,27 @@ function tryPlay(x, y, byAI) {
   const b = boardAt(state.moves.length);
   if (b[idx(x, y)] !== 0) return false;
 
-  // 打劫禁着点
+  /* ★★★ 打劫禁着点（2026-10-15 修「倒扑被当成劫」后的最终形态）
+     —— 判据**照主流开源软件 Sabaki 的 @sabaki/go-board（GoBoard.js 第 82-93 行）来**：
+       提子数 == 1  且  落下的这子是**孤子**（四邻没有己方子）
+        且  它落子后**只有 1 口气**  且  这口气正是刚被提掉的那一点
+     四条同时成立才算「这一手制造了劫」。几何含义很直白：
+       我这子孤零零一口气，对方下那一口气就能把我提回原样 —— 这才是劫。
+
+     ⚠️ 上一版的四行只用了「这一点 == 上一手的提子点」一条，于是：
+       白 84 扑（W[mi]）→ 黑 85 提掉这一子（提 1 子，禁着点被设到 (12,8)）
+        → 白 86 点回 (12,8)、本该提走 7 颗黑子（黑 40 → 33），却被判「打劫，不能下」。
+     缺的正是「孤子」那条：黑 85 提子后**连着己方大块**，对方点回提走的是整块，局面不重复。
+
+     ★ 为什么用 Sabaki 判据而不是原来那条 KaTrain 式（`落点==上一手提子点 && 本手提1子`）：
+       两者在本场景下可证等价，但 Sabaki 判据**只读当前盘面**，
+       不碰 `prev.captured` / `prev.capAt` 这两个"要靠 rebuildCapAt 补算"的历史字段 ——
+       打开棋谱接着摆、悔棋、切分支时都不会失效（那些正是历史上打劫判据反复翻车的地方）。
+       所以下面那条 KaTrain 判据已删，判据只有一个来源，见函数末尾与 koFromBoard()。
+
+     回归：dev/_cdp_ko.mjs（真实棋谱 + 真劫对照 + 构造倒扑 + Sabaki 原始测试棋形）。 */
   if (state.koPoint && state.koPoint.x === x && state.koPoint.y === y) {
-    flash('打劫：此处暂时不能下，得先在他处走一手');
+    flash('打劫：不能立刻提回，得先在他处走一手');
     return false;
   }
 
@@ -1956,38 +1977,19 @@ function tryPlay(x, y, byAI) {
       }
     }
   }
-  // 提子后自己仍无气 → 自杀，非法
-  if (group(b, x, y).libs.size === 0) return false;
+  // 提子后自己仍无气 → 自杀，非法（中国规则/日韩规则都禁自杀）
+  const myGroup = group(b, x, y);
+  if (myGroup.libs.size === 0) return false;
 
-  /* ★★★ 打劫（Ko）—— **照抄 KaTrain 的写法**（不是我琢磨的启发式）。
-     来源：github.com/sanderland/katrain  `katrain/core/game.py`
-       第 156 行：  ko_or_snapback = len(self.last_capture) == 1 and self.last_capture[0] == move
-       第 187 行：  if ko_or_snapback and len(self.last_capture) == 1 and not ignore_ko:
-                        raise IllegalMoveException("Ko")
-
-     翻译成这里的话 —— 状态只有一个：**上一手（对方那一手）提掉了哪一点**。
-       「这一手是不是在上一手单子被提的那一点回提」 AND 「这一手也只提 1 子」 → 判劫
-     就这两条，没有别的条件、也不需要预判未来。
-
-     为什么这两条就够了（KaTrain 的设计，我之前绕了四版才看明白）：
-       · 真劫：对方提走我一子 → 我在那一点回提、只提 1 子 → 判劫 ✓
-       · 倒扑：我回提会一口气提走 ≥2 子 → 第二条不成立 → 放行 ✓
-       · "提掉一个本来就只剩 1 气的子"：上一手提的**不是**我要下的这一点
-         → 第一条不成立 → 放行 ✓
-     我前面四版分别用「提1子+孤子+只剩1气」「把被提子放回去再比」
-     「比 boardAt(n)/boardAt(n-1)」「模拟对方回提再比快照」——全都是在**预判未来**，
-     而预判要处理提子、要吃透 boardAt 的索引语义，我就栽在那些细节上。
-     KaTrain 不预判，只看"上一手干了什么"，所以它不会错。 */
-  const prev = state.moves[state.moves.length - 1];        // 上一手（对方那一手）
-  const 回提上一手被提的那一点 = !!(prev && !prev.pass && prev.captured === 1
-    && prev.capAt && prev.capAt.x === x && prev.capAt.y === y);
-  if (回提上一手被提的那一点 && captured === 1) {
-    flash('打劫：不能立刻提回，得先在他处走一手');
-    return false;
-  }
-  /* 禁着点（给界面画"此处暂时不能下"）：我这一手提了 1 子 → 那一点就是禁着点。
-     （对方在那儿回提会还原局面。他若在那儿下别的、或提多子，规则自然放行。） */
-  state.koPoint = (captured === 1 && capAt) ? { x: capAt.x, y: capAt.y } : null;
+  /* ★ 这一手有没有**制造劫**（Sabaki 判据，四条缺一不可）—— 制造了才把禁着点设到那一点。
+     ① 本手只提 1 子            ② 落下的这子是孤子（四邻没有己方子）
+     ③ 它落子后只有 1 口气       ④ 那口气正是刚提掉的那一点（= 对方回提就能还原局面）
+     缺哪一条都不是劫，典型就是倒扑：提完连着己方大块（②不成立）→ 对方点回提走整块，局面不重复。 */
+  const onlyLib = (myGroup.libs.size === 1) ? [...myGroup.libs][0] : -1;
+  const 这一手制造了劫 = captured === 1 && !!capAt
+    && onlyLib >= 0 && onlyLib === idx(capAt.x, capAt.y)
+    && neighbors(x, y).every(([nx, ny]) => b[idx(nx, ny)] !== c);
+  state.koPoint = 这一手制造了劫 ? { x: capAt.x, y: capAt.y } : null;
 
   /* ★ 落子 = 建节点并挂进树（决策 9：与父亲下已有的**同着** → 跳过去，不建重复）
      ★★ 段②（2026-10-13）：**试下（草稿）的手不挂树** —— 只 push 一个裸节点。
@@ -2029,12 +2031,26 @@ function tryPlay(x, y, byAI) {
    所以悔棋之后必须重算，不能清成 null（清了就等于放行，用户 2026-10-07 报过）。
    反过来，悔棋**退掉一个"在别处走"的手**之后，劫其实又成立了，禁着点该回来。
 
-   ★★ 判据与 tryPlay **完全一致**（KaTrain 那两条）：
-        上一手（对方那一手）只提了 1 子 → 它提的那一点就是禁着点。
-      不预判未来、不模拟、不比盘面 —— 只看"上一手干了什么"。 */
-function koFromBoard(b, moves) {
-  const last = moves[moves.length - 1];
+   ★★ 判据与 tryPlay **完全一致**（2026-10-15 起统一成 Sabaki 那条"形状判据"）：
+        最后一手提 1 子、落下的这子**是孤子**、它**只有 1 口气**、且那口气正是提掉的那一点。
+      ⚠️ 不能用「上一手的提子点 == 落点」这种只比坐标的写法 —— 倒扑会被误判成劫，
+         首相 2026-10-15 报的第 86 手就是这么被拦的（详见 tryPlay 里的长注释）。
+
+   ⚠️⚠️ `at` = **盘面对应的手数**（省略 = 手顺长度）：`b` 必须是 boardAt(at)、
+      `last` 必须是 moves[at - 1]。原来这个函数只读 moves 的**末尾**，而调用点
+      （提升主变 / 删分支 / 撤销删除）传进来的盘面是 boardAt(viewAt) ——
+      回看状态下两者整错开，算出来的是**另一个局面的禁着点**，
+      于是要么错拦一个点、要么该拦的没拦。现在把 at 显式传进来，盘面与手一一对应。 */
+function koFromBoard(b, moves, at) {
+  const n = (at === undefined) ? moves.length : at;
+  const last = moves[n - 1];
   if (!last || last.pass || last.captured !== 1 || !last.capAt) return null;
+  const c = last.color === 'b' ? 1 : 2;
+  if (b[idx(last.x, last.y)] !== c) return null;              // 保险：这一手已不在盘上（被提了）
+  const libs = group(b, last.x, last.y).libs;
+  if (libs.size !== 1) return null;                          // 我提子后不止一口气 → 不是劫
+  if ([...libs][0] !== idx(last.capAt.x, last.capAt.y)) return null;   // 那口气不是被提点 → 不是劫
+  if (neighbors(last.x, last.y).some(([nx, ny]) => b[idx(nx, ny)] === c)) return null;  // 不是孤子 → 不是劫
   return { x: last.capAt.x, y: last.capAt.y };
 }
 
@@ -2123,7 +2139,13 @@ canvas.addEventListener('mousemove', e => {
   const my = e.clientY - rect.top;
   let next = null;
 
-  if (!state.noGame && state.viewAt === state.moves.length && !state.thinking) {
+  /* ★ 2026-10-15（首相报的「点树面板里一个珠子后，棋盘上的落子预览小方块就没了」）：
+     根因就是原来这一行里的 `state.viewAt === state.moves.length` ——
+     点树上的珠子 = 跳到那一手 = **进入回看**，预览于是被挡掉（看着像坏了）。
+     而本软件本来就允许从回看点落子（落子会从这里开新分支，旧枝仍在树里，↑/↓ 能切回），
+     既然能下就该看得见 —— 回看中的方块画成**半透明**（见 draw 里那段），一眼能区分。
+     ⚠️ `state.thinking`（AI 思考中）与 `state.noGame`（未开局）仍然挡掉：那两种情况下确实不该有预览。 */
+  if (!state.noGame && !state.thinking) {
     const x = Math.round((mx - pad) / gap);
     const y = Math.round((my - pad) / gap);
     if (x >= 0 && x < N && y >= 0 && y < N) {
@@ -2424,7 +2446,7 @@ function enterDraft() {
          漏了会画出幽灵手数、分析还可能死锁（悔棋 2026-10-06 的教训）。 */
   state.moves.length = from;
   state.toMove = sideToMove(from);
-  state.koPoint = koFromBoard(boardAt(from), state.moves);
+  state.koPoint = koFromBoard(boardAt(from), state.moves, from);
   state.pv = null;                       // 变化图基于旧局面，作废
   truncateAnalysisTo(from);
   state.clock.paused = true;      // 「存档暂停」—— 试下期间不走表
@@ -2697,7 +2719,7 @@ $('btn-undo').onclick = () => {
      复现证据见 dev\_cdp_ko_user.mjs（用用户自己那份 GN[打劫BUG] 棋谱走的整条链）。
      ★ 同一处还有个反向错：悔棋**退掉一个"在别处走"的手**之后，劫其实又成立了
        （禁着点该回来），而原来是一律清 null —— 两个方向都错。 */
-  state.koPoint = koFromBoard(boardAt(state.moves.length), state.moves);
+  state.koPoint = koFromBoard(boardAt(state.moves.length), state.moves, state.moves.length);
   /* ★ 顺手补上每手的 `capAt`（"这一手提掉了哪一点"）——
      打劫判据要靠它判断"这一手是不是在上一手被提的那点回提"。
      悔棋之后手顺被截断，重算一遍最省心（只在悔棋时做，开销可忽略）。 */
@@ -3308,7 +3330,7 @@ function applyRecord(rec, srcName) {
      先补 `capAt`（棋谱手顺里没有这个字段），再反推禁着点。 */
   state.koPoint = null;
   rebuildCapAt();
-  state.koPoint = koFromBoard(boardAt(state.moves.length), state.moves);
+  state.koPoint = koFromBoard(boardAt(state.moves.length), state.moves, state.moves.length);
   state.viewAt = state.moves.length;
   state.candidates = []; state.candAt = -1;
   state.ownership = null; state.ownAt = -1;

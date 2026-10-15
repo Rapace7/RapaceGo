@@ -1,0 +1,1 @@
+(() => { location.reload(); return 'reloading'; })()
