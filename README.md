@@ -360,16 +360,31 @@ RDNA3 = `gfx110X`、RDNA3.5 = `gfx1151`、RDNA4 = `gfx120X`。
 > 正常加载最新的 transformer 权重）。版本对不上时 KataGo 会**直接退出**，
 > —— 本软件会把这个原因显示在棋盘中央的提示框里，照着换一份就行。
 
-1. 打开 **<https://katagotraining.org/>**
-2. 找到 **Networks** 那一栏。**推荐的做法**：去
-   <https://github.com/lightvector/KataGo/releases> 最新那条 Release 的 Assets 里
-   找随附的权重 —— 那些是**和该版本引擎配套**的，下下来必定能用。
-3. 你需要两份：
+1. **强模型**（算胜率、推荐点、形势、复盘用的那个）—— 下面**任选一处**：
+   - <https://katagotraining.org/networks>：找最新那一批（现在叫 `kata1-tf3-…`）；
+   - 或 <https://github.com/lightvector/KataGo/releases> **最新那条** Release 的 **Assets**
+     里随附的权重 —— 那些是**和该版本引擎配套**的，下下来必定能用。
+2. **人类棋风模型**（当 AI 对手用的那个）—— ⚠️ **只有一处，别在训练站里翻**：
 
-| 用途 | 叫什么 | 说明 |
+   **👉 [点这里直接下载 `b18c384nbt-humanv0.bin.gz`](https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz)**
+
+   （约 95 MB。也可以进 <https://github.com/lightvector/KataGo/releases/tag/v1.15.0>，
+   在页面下方的 **Assets** 里找同名文件。）
+
+   > ⚠️ **为什么别处找不到它**：训练站的 Networks 列表里**没有**（那里只发自对弈训练的
+   > `kata1` 系列），**最新 Release 的 Assets 里也没有**。这份 human 权重是 2023 年随
+   > KataGo **v1.15.0** 的「人类风格对弈」功能一起发布的，**之后没有更新过**，
+   > 所以只有 v1.15.0 那个 Release 里有。
+   >
+   > 引擎**不用**为它退版本：它属于 `b18c384nbt` 架构，**v1.13.0 以上的引擎都认**，
+   > 现在用的 v1.18.x 直接能加载。
+
+两份对照：
+
+| 用途 | 文件名 | 从哪下 |
 |---|---|---|
-| 算胜率、推荐点、形势、复盘（"强"模型） | 最新最强的那个（如 `kata1-tf3-…`，或随发布附带的 `b18c384nbt` / `b11c768nbt`） | 不带 `human` 字样的那个 |
-| **当 AI 对手**用 | `b18c384nbt-humanv0.bin.gz` | ⚠️ 文件名必须带 **`human`** |
+| 算胜率、推荐点、形势、复盘（"强"模型） | 最新最强的那个（如 `kata1-tf3-…`，或随发布附带的 `b18c384nbt` / `b11c768nbt`） | [训练站 Networks](https://katagotraining.org/networks)，或[最新 Release 的 Assets](https://github.com/lightvector/KataGo/releases) |
+| **当 AI 对手**用 | `b18c384nbt-humanv0.bin.gz` | ⚠️ **[点此直下](https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz)**（只此一处） |
 
 > ⚠️ **对弈权重一定得用带 `human` 的那个**：拿普通权重去当对手，引擎会直接报错退出
 > （它要读人类段位档 `humanSLProfile`）。

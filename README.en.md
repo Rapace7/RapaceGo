@@ -280,7 +280,8 @@ your own copies — they are third-party projects with their own licenses:
 | What | Where from | Put it at |
 |---|---|---|
 | **KataGo** binary | [lightvector/KataGo](https://github.com/lightvector/KataGo/releases) (Windows) | `<app>\KataGo\engine\katago.exe` |
-| **KataGo weights** (two) | [katagotraining.org](https://katagotraining.org/) — one strong, one `human` | `<app>\KataGo\weights\*.bin.gz` |
+| **KataGo strong weight** | [katagotraining.org/networks](https://katagotraining.org/networks), or the Assets of the [latest KataGo release](https://github.com/lightvector/KataGo/releases) | `<app>\KataGo\weights\*.bin.gz` |
+| **KataGo human weight** (the AI opponent) | ⚠️ **only here →** [`b18c384nbt-humanv0.bin.gz`](https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz) | `<app>\KataGo\weights\b18c384nbt-humanv0.bin.gz` |
 | **llama.cpp** runtime | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/releases), CUDA build (**the official zip does NOT bundle the CUDA runtime — grab the matching `cudart` zip too**) | `<app>\LoGos\llama-server.exe` |
 | **LoGos-7B** weights | [YichuanMa/LoGos-7B](https://huggingface.co/YichuanMa/LoGos-7B), converted to GGUF (Q4_K_M ≈ 4.4 GB) | `<app>\LoGos\LoGos-7B-Q4_K_M.gguf` |
 
@@ -296,6 +297,14 @@ RapaceGo/
    ├─ llama-server.exe
    └─ LoGos-7B-Q4_K_M.gguf
 ```
+
+> ### ⚠️ Where the `human` weight actually lives
+> It is **not** on [katagotraining.org](https://katagotraining.org/networks) (that site only serves
+> the self-play `kata1` series) and **not** in the latest release's Assets. The human-like weight was
+> shipped once, with **v1.15.0**, and never updated since — so only that release has it:
+> **[`b18c384nbt-humanv0.bin.gz`](https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz)**
+> (≈95 MB; or open the [v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0) and look under Assets).
+> Your engine does **not** need to be downgraded for it: it is a `b18c384nbt` net, loaded by any engine **v1.13.0+**.
 
 > ### `.bin.gz` or plain `.bin`? **Both work.**
 > `katagotraining.org` hands out gzipped weights (`.bin.gz`) — use them as-is, no unpacking.
