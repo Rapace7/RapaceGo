@@ -1949,6 +1949,21 @@ const BACKEND_HINTS = {
   onnx:    { name: 'ONNX', brand: null, downloads: 'onnx 系列' },
 };
 
+/* ★★ 这张显卡该下哪个构建（2026-10-18 新增）。
+   ⚠️ 别和 `BACKEND_HINTS[...].downloads` 搞混：那张表说的是「这个后端对应什么包」，
+   只够描述**当前装的是什么**；给用户的建议必须按**他自己的显卡**算。
+   2026-10-18 就是因为把两者用反了 —— Intel 核显用户被叫去下「cuda / trt（NVIDIA 专用）」，
+   照做只会再下一次错版本。 */
+function downloadsForBrand(brand) {
+  switch (brand) {
+    case 'nvidia': return 'cuda / trt 系列（NVIDIA 专用）';
+    case 'amd':    return 'opencl 系列（通用，A 卡也能用），或 rocm 系列（AMD 专用，要按 GPU 的 gfx 代号挑）';
+    case 'intel':  return 'opencl 系列（通用，Intel 核显 / 独显都能用）';
+    case 'apple':  return 'macOS 用 Homebrew 装（brew install katago，Metal 后端）';
+    default:       return 'opencl 系列（通用，NVIDIA / AMD / Intel 都能用）';
+  }
+}
+
 /* 认不出的后端名一律当"未知"处理 —— 绝不用不确定的名字去报错（假警报比沉默更糟）。 */
 function probeBackendSync(exePath) {
   if (!exePath || !fs.existsSync(exePath)) return { ok: false, why: ('找不到 ' + KATAGO_LABEL) };
@@ -1986,29 +2001,52 @@ function probeBackendSync(exePath) {
    ⚠️ 2026-10-07 实测踩到：`app.getGPUInfo('basic')` 里的 `vendorId` 是**十进制数**。
    本机 N 卡拿到的是 `4318`，而我一开始按十六进制 `0x10de` 去比 —— 匹配不上，
    于是"显卡品牌"永远是空串，**不匹配警告永远不会触发**（静默失效，最难发现的那类）。
-   现在两种写法都认：先按原样查，查不到再按十六进制补零查。 */
+   现在两种写法都认：先按原样查，查不到再按十六进制补零查。
+
+   ★★ 2026-10-18（用户反馈「核显机器被叫去下 CUDA 版」时查出来的第 1 个毛病）：
+   原来**只取 `gpuDevice[0]`**。双显卡笔记本上第一块可能是核显，也可能是
+   「Microsoft Basic Render Driver」（0x1414，纯软件渲染）——那样就会把独显漏掉，
+   判断与展示全错。现在收全部设备，按 **NVIDIA > AMD > Apple > Intel** 挑主力一块
+   （与 `detectGpuBrandSync()` 的优先级同一套：引擎是给独显用的），软件渲染器只在
+   实在没有别的设备时才兜底；`list` 留给界面显示「本机还有哪块卡」。 */
 async function gpuInfo() {
   try {
     const info = await app.getGPUInfo('basic');
-    const g = ((info && info.gpuDevice) || [])[0] || {};
-    const raw = String(g.vendorId || '').trim().toLowerCase();
-    /* PCI 厂商号：10de=NVIDIA 1002/1022=AMD 8086=Intel 106b=Apple 1af4=virtio */
+    /* PCI 厂商号：10de=NVIDIA 1002/1022=AMD 8086=Intel 106b=Apple 1414=微软软件渲染 */
     const BRAND = { '10de': 'nvidia', '1002': 'amd', '1022': 'amd', '8086': 'intel', '106b': 'apple', '1af4': 'virtio' };
+    const RANK  = { nvidia: 0, amd: 1, apple: 2, intel: 3, virtio: 4 };   // 越小越该当主力
     const asHex = (v => {
       if (!v) return '';
       if (v.startsWith('0x')) return v.slice(2).padStart(4, '0');
       /* 纯数字：十进制 → 十六进制补到 4 位（4318 → 10de） */
       if (/^\d+$/.test(v)) return Number(v).toString(16).padStart(4, '0');
       return v;                                   // 已经是 "10de" 这种十六进制串
-    })(raw);
+    });
+    const devs = (((info && info.gpuDevice) || [])).map(g => {
+      const raw = String(g.vendorId || '').trim().toLowerCase();
+      const hex = asHex(raw);
+      return {
+        brand: BRAND[raw] || BRAND[hex] || '',
+        vendorId: hex || raw,
+        deviceId: String(g.deviceId || ''),
+        name: [g.vendorString, g.deviceString].filter(Boolean).join(' ').trim().slice(0, 80),
+      };
+    }).filter(d => d.name || d.vendorId);
+    /* 真显卡：品牌认得出来、且不是微软软件渲染器 */
+    const real = devs.filter(d => d.brand && d.vendorId !== '1414');
+    const pool = real.length ? real : devs;
+    const primary = pool.slice().sort((a, b) => (RANK[a.brand] === undefined ? 9 : RANK[a.brand]) - (RANK[b.brand] === undefined ? 9 : RANK[b.brand]))[0] || {};
     return {
-      brand: BRAND[raw] || BRAND[asHex] || '',
-      vendorId: asHex || raw,
-      deviceId: String(g.deviceId || ''),
-      name: [g.vendorString, g.deviceString].filter(Boolean).join(' ').trim().slice(0, 80),
+      brand: primary.brand || '',
+      vendorId: primary.vendorId || '',
+      deviceId: primary.deviceId || '',
+      name: primary.name || '',
+      /* 界面上「本机共几块卡、都是什么」用这个；主力一块排第一 */
+      list: pool.slice().sort((a, b) => (RANK[a.brand] === undefined ? 9 : RANK[a.brand]) - (RANK[b.brand] === undefined ? 9 : RANK[b.brand])
+      ).map(d => ({ brand: d.brand, name: d.name })),
     };
   } catch (e) {
-    return { brand: '', vendorId: '', deviceId: '', name: '' };
+    return { brand: '', vendorId: '', deviceId: '', name: '', list: [] };
   }
 }
 
@@ -2070,8 +2108,12 @@ async function engineCheck() {
   if (be.brand && gpu.brand && be.brand !== gpu.brand) {
     const bName = { amd: 'AMD', intel: 'Intel', nvidia: 'NVIDIA', apple: 'Apple' }[gpu.brand] || gpu.brand;
     const eName = { nvidia: 'NVIDIA 专用（CUDA）', amd: 'AMD 专用（ROCm）', intel: 'Intel 专用', apple: 'Apple 专用（Metal）' }[be.brand] || be.brand;
-    out.warn = '这台机器的显卡是 ' + bName + '，而当前的 KataGo 是「' + eName + '」版 —— **跑不起来**。'
-      + '要去 KataGo 官方 Release 下「' + (be.downloads || '对应你显卡的那份') + '」，'
+    /* ★★ 2026-10-18 修：这里原来给的是 `be.downloads` —— **当前装的那套**对应的包，
+       于是 Intel 核显用户被告知「去下 cuda / trt 系列（NVIDIA 专用）」，照做再错一次。
+       建议必须按**本机这张显卡**给（downloadsForBrand），与「当前装的是什么」无关。 */
+    out.warn = '这台机器的显卡是 ' + bName + (gpu.name ? '（' + gpu.name + '）' : '')
+      + '，而当前的 KataGo 是「' + eName + '」版 —— 这个组合**跑不起来**。'
+      + '你该下的是「' + downloadsForBrand(gpu.brand) + '」，'
       + '在「设置」里把「KataGo 程序」指到新的 katago.exe。';
   }
   /* ★ 顺带查一下 AI 讲解引擎（LoGos）能不能用（2026-10-08 加，见 probeLlamaDevices 的注释）。
