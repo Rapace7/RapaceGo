@@ -51,7 +51,15 @@ app.whenReady().then(async () => {
   const unk = downloadsForBrand('');
   ok(/opencl/i.test(unk), '认不出显卡时兜底给 opencl（通用）');
 
-  console.log('== ② 显卡清单（多显卡不再只看第一块）==');
+  console.log('== ② 没有标识文件时，问引擎自己（不猜、不硬换）==');
+  const pbc = new Function('fs', 'execFileSync', 'KATAGO_LABEL',
+    cut('probeBackendSync') + '\n' + cut('probeBrandCached') + '\nreturn probeBrandCached;')(
+      require('fs'), require('child_process').execFileSync, 'KataGo');
+  const none = pbc('Z:\\nope\\katago.exe');            // 文件不存在 → 不许抛、不许乱猜
+  ok(none === '', '文件不存在时返回 ""（说不准就不动）');
+  ok(pbc('Z:\\nope\\katago.exe') === '', '第二次调用同样结论（缓存不炸）');
+
+  console.log('== ③ 显卡清单（多显卡不再只看第一块）==');
   const g = await gpuInfo();
   console.log('  主力：' + (g.name || '(空)') + ' / 品牌：' + (g.brand || '(空)') + ' / list=' + JSON.stringify(g.list));
   ok(!!g.brand, '认出了主力显卡的品牌');

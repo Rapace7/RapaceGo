@@ -424,8 +424,15 @@ function pickWorkingEngine(kind, want) {
        · KataGo：want = `...\engine\katago.exe`  → 目录 = 它的上一级
        · LoGos ：want = `...\llama-server.exe`   → 目录 = 它的上一级 */
     const have = path.dirname(want);
-    const haveBrand = backendBrandOfDir(kind, have);
-    if (!haveBrand && kind === 'katago') return null;               // ② 认不出这套 → 不动
+    let haveBrand = backendBrandOfDir(kind, have);
+    /* ★ 2026-10-19：没有标识文件时（**从 GitHub zip 自己配引擎的用户**就是这样，
+       他们的目录里不会有 lizzieyzy-next-engine-backend.txt），直接问引擎自己 ——
+       否则这道"自动换到匹配的那套"的保险，对这批人等于没有。
+       只认"确定"的结论：跑不起来 / 说不准 → 当认不出，不动。 */
+    if (!haveBrand && kind === 'katago') {
+      haveBrand = probeBrandCached(want);                           // 'nvidia' / 'generic' / ''
+      if (!haveBrand) return null;                                  // ② 认不出这套 → 不动
+    }
     const wantNv = (haveBrand === 'nvidia');
     const needNv = (gpu === 'nvidia');
     if (wantNv === needNv) return null;                             // ③ 匹配 → 不换
@@ -1962,6 +1969,20 @@ function downloadsForBrand(brand) {
     case 'apple':  return 'macOS 用 Homebrew 装（brew install katago，Metal 后端）';
     default:       return 'opencl 系列（通用，NVIDIA / AMD / Intel 都能用）';
   }
+}
+
+/* 引擎自己报的品牌（带缓存）：'nvidia' = N 卡专用版；'generic' = 认得出、但不是 N 卡专用版；
+   '' = 说不准（文件不在 / 跑不起来 / 输出里没有 We are using ... backend）。
+   给 pickWorkingEngine 兜底用 —— 只在"目录里没有标识文件"时才问它（见那里注释）。 */
+const _probeBrandCache = new Map();
+function probeBrandCached(exe) {
+  try {
+    if (_probeBrandCache.has(exe)) return _probeBrandCache.get(exe);
+    const pb = probeBackendSync(exe);
+    const v = !pb || !pb.ok ? '' : (pb.brand === 'nvidia' ? 'nvidia' : 'generic');
+    _probeBrandCache.set(exe, v);
+    return v;
+  } catch (e) { return ''; }
 }
 
 /* 认不出的后端名一律当"未知"处理 —— 绝不用不确定的名字去报错（假警报比沉默更糟）。 */
