@@ -22,7 +22,14 @@ $ErrorActionPreference = 'Stop'
 
 $SRC  = $WDeploy
 $DEST = 'C:\Users\rapac\Desktop\RapaceGo懒人包'
-$EXCLUDE = @('settings.json', 'records', 'userdata', 'start.bat', 'engine-logs')
+# 2026-10-23: TWO lists -- they are NOT the same thing.
+#   COPY_SKIP        : not copied from the build (engine/model dirs never change with a version bump;
+#                      copying them again wastes ~8GB of IO and risks touching the .bin.gz weights)
+#   MUST_GONE        : must never exist inside a package that goes to other people (user state/local only)
+# BUG FIX (2026-10-23): these used to be one list, so the "clean leftovers" step DELETED
+# the package's own KataGo\ and LoGos\ dirs. Keep them separate.
+$COPY_SKIP  = @('settings.json', 'records', 'userdata', 'start.bat', 'engine-logs', 'KataGo', 'LoGos')
+$MUST_GONE  = @('settings.json', 'records', 'userdata', 'start.bat', 'engine-logs')
 
 if (-not (Test-Path $SRC))  { throw "源目录不存在：$SRC" }
 if (-not (Test-Path $DEST)) { throw "懒人包目录不存在：$DEST" }
@@ -30,7 +37,7 @@ if (-not (Test-Path $DEST)) { throw "懒人包目录不存在：$DEST" }
 Write-Host '=== 1/4 复制程序文件 ==='
 $copied = 0
 Get-ChildItem -LiteralPath $SRC -Force | ForEach-Object {
-    if ($EXCLUDE -contains $_.Name) {
+    if ($COPY_SKIP  -contains $_.Name) {
         Write-Host ("  跳过 " + $_.Name + "（不该进懒人包）") -ForegroundColor DarkGray
         return
     }
@@ -61,7 +68,7 @@ Write-Host '=== 2/4 核对懒人包里绝不能出现的东西 ==='
 #   它就会在包内自己生成 records\ 和 userdata\（还可能有个 engine-logs\）。
 #   所以这里不能只"报告"，要**直接清掉**（它们本来就不该出现在发给别人的包里）。
 $bad = @()
-foreach ($n in $EXCLUDE) {
+foreach ($n in $MUST_GONE) {
     $p = Join-Path $DEST $n
     if (Test-Path $p) { Remove-Item $p -Recurse -Force; $bad += $n }
 }

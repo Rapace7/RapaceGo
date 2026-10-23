@@ -372,7 +372,7 @@ function draw() {
     ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, gap * 0.075), 0, 7); ctx.fill();
   }
 
-  /* 棋盘坐标（可开关）：底边 A–T、���边 1–N 从下往上数。
+  /* 棋盘坐标（可开关）：底边 A–T、上边 1–N 从下往上数。
      ★ 用 GTP_COLS 而不是另写一份字母表 —— 之前这里、toGTP、SGF 导出各有一份，
        三份表一旦改了一处忘了另一处，坐标就会错位（真发生过，见第 4 行注释）。 */
   if (state.showCoords) {
@@ -578,11 +578,14 @@ function group(b, x, y) {
   return { stones, libs };
 }
 
-function boardAt(n) {
+/* 按**任意一条手顺**（节点数组）重放盘面 —— 主线与当前路径不是一回事之后，
+   「整盘讲解要的盘面」只能从主线重放，不能再默认读 state.moves。 */
+function boardOfPath(chain, n) {
   const b = new Int8Array(N * N);
   for (const s of state.setup) b[idx(s.x, s.y)] = s.color === 'b' ? 1 : 2;
   for (let i = 0; i < n; i++) {
-    const m = state.moves[i];
+    const m = chain[i];
+    if (!m) break;                       // 越界就停（不静默补空手，免得掩盖调用方的错）
     if (m.pass) continue;
     const c = m.color === 'b' ? 1 : 2;
     b[idx(m.x, m.y)] = c;
@@ -594,6 +597,11 @@ function boardAt(n) {
     }
   }
   return b;
+}
+
+/* 当前路径走完 n 手之后的盘面（绝大多数调用点用这个） */
+function boardAt(n) {
+  return boardOfPath(state.moves, n);
 }
 
 /* ---------------- 手数分支（真分支树，2026-10-13 首相指定） ----------------
@@ -665,9 +673,13 @@ function pushPassNode() {
   const parent = state.moves.length ? state.moves[state.moves.length - 1] : branchRoot;
   if (!parent._cs) parent._cs = [];
   let nd = parent._cs.find(c => c.pass);        // 同一个局面下再停一手 → 复用同一个节点
+  const reused = !!nd;
   if (!nd) { nd = { pass: true, color: state.toMove, _p: parent, _cs: [] }; parent._cs.push(nd); }
   state.moves.push(nd);
-  clearCoachAt(state.moves.length);             // 该手号上的旧讲解作废
+  /* ★ 2026-10-23（审查二）：与普通落子同一口径 —— 复用已有的停一手不算换了棋，
+     这一手自己的讲解 / 解说词 / 评估要放回来；新建才作废旧讲解。 */
+  if (reused) { restoreExplainForPath(); restoreAnalysisForPath(); }
+  else clearCoachAt(state.moves.length);       // 该手号上的旧讲解作废
   /* ★ 2026-10-15（审查补 · P2-1 入口①）：**脱先一手，劫自然消解** ——
      这条原来只写在「人类停一手」那一处（app.js 的 btn-pass），AI 停一手那条漏了，
      于是 AI 脱先后禁着点还挂着：轮到人时连**普通合法的一手**落在那个点都会被误报「打劫」。
@@ -693,6 +705,40 @@ function pathThrough(node) {
   let cur = node;
   while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; p.push(cur); }
   return p;
+}
+
+/* ---------------- 路径能走多长 / 往后接（2026-10-23 首相报的「落一手跳到底」的配套） ----------------
+ *
+ * 背景：`state.moves` 是「根 → 当前节点」的路径，不是整盘棋的全文。落子**只走到落下的那一手**
+ * （与 Sabaki 同一口径：appendNode 合并到已有子节点后 setCurrentTreePosition 到该节点，不前跳），
+ * 于是落点之后、树上还挂着的那一段就成了「当前路径之外」的手。
+ * 这一段既不能丢（P1-1：悔棋后重下同一手，尾巴要够得着），也不能靠落子自动跳过去
+ * （首相 2026-10-23：按棋谱记录落第 15 手，直接跳到该支最后一手）。
+ * 所以：**落子只走一手，前进交给翻页** —— 滑杆 / → / 跳末都沿 `_cs[0]` 把路径接上去。
+ */
+/* 当前路径末端沿 `_cs[0]` 还能走多远（总手数）。滑杆上限与「跳末」用这个，
+   而不是 `state.moves.length` —— 后者只是"已经走到第几手"。 */
+function reachLength() {
+  ensureBranch();
+  let n = state.moves.length;
+  let cur = n ? state.moves[n - 1] : branchRoot;
+  while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; n++; }
+  return n;
+}
+
+/* 把路径**向后延长**到第 n 手（只增不减；viewAt 由调用方决定）。
+   ★ 草稿（试下）期间不接：草稿手不挂树（决策 10），它的 `_cs` 是空的保险字段。 */
+function extendPathTo(n) {
+  if (state.draft) return;
+  let grew = false;
+  while (state.moves.length < n) {
+    const cur = state.moves.length ? state.moves[state.moves.length - 1] : branchRoot;
+    if (!cur || !cur._cs || !cur._cs.length) break;
+    state.moves.push(cur._cs[0]);
+    grew = true;
+  }
+  /* 接上来的手，讲解 / 棋谱解说词 / 评估都寄在各自节点上 → 照常放回按手号的数组里 */
+  if (grew) { restoreExplainForPath(); restoreAnalysisForPath(); }
 }
 
 /* ---------------- 主线内容指纹（坑位 42 的根治，2026-10-13 首相拍板方案 A） ----------------
@@ -734,11 +780,12 @@ function branchParentAt(at) {
    ★ 2026-10-13 段②：**棋谱自带的解说词（`state.sgfComments`）一起寄** —— 它也是按手号存的，
      切分支 / 提升主变 / 删分支之后手号的意义全变，不寄就会把别的棋的解说词显示出来。
      两者同构，所以放在同一个函数里处理（多一个字段 `_sc` 而已）。 */
-function stashExplainAfter(k) {
+function stashExplainAfter(k, nodes) {
+  nodes = nodes || state.moves;
   const ex = state.coach && state.coach.explain;
   const sc = state.sgfComments;
-  for (let at = k + 1; at <= state.moves.length; at++) {
-    const node = state.moves[at - 1];
+  for (let at = k + 1; at <= nodes.length; at++) {
+    const node = nodes[at - 1];
     if (!node) continue;
     if (ex && ex[at]) { node._ex = ex[at]; delete ex[at]; }
     if (sc && sc[at]) { node._sc = sc[at]; delete sc[at]; }
@@ -770,8 +817,8 @@ function restoreExplainForPath() {
  * 索引语义（照抄 truncateAnalysisTo 的注释）：`history[at]` = 「走完第 at 手之后」的
  * 局面，所以它属于 `state.moves[at - 1]`（第 at 手那个节点）。
  * `history[0]` 是空盘、分叉点那个局面两条分支共用 → **不寄**。 */
-function stashAnalysisAfter(k) {
-  const nodes = state.moves;
+function stashAnalysisAfter(k, nodes) {
+  nodes = nodes || state.moves;
   for (let i = k + 1; i < state.history.length; i++) {
     const node = nodes[i - 1];
     if (!node) break;
@@ -791,6 +838,11 @@ function restoreAnalysisForPath() {
   for (let i = 1; i <= state.moves.length; i++) {
     const node = state.moves[i - 1];
     if (!node || !node._an) continue;
+    /* ★ 2026-10-23（审查二）：**别拿旧值盖掉更准的新值**。
+       与 rememberEval 的「不许倒退」同一口径 —— 节点上寄存的是当初切走时的精度，
+       如果这一格已经用更大的搜索量算过，保留新的。 */
+    const have = state.histVisits ? state.histVisits[i] : undefined;
+    if (typeof have === 'number' && have > (node._an.v || 0)) continue;
     while (state.history.length <= i) state.history.push(undefined);
     state.history[i] = node._an.h;
     if (state.leads) {
@@ -805,19 +857,32 @@ function restoreAnalysisForPath() {
 }
 
 /* ---------------- 主变判定（任务 1，2026-10-13 傍晚） ---------------- */
+/* 主变链节点（从根沿每层 `_cs[0]` 走到底）。全软件只有这一处实现，别再各写一遍。
+   ★ 2026-10-23：加它是为了收口一个口径 —— 「这盘棋有多少手」= 主线长度（树），
+     不是 `state.moves.length`（那是「已经走到第几手」）。落子只走一手之后两者会分家，
+     凡是按手号整盘做事的地方（全盘讲解 / 讲解放盘 / 导出文件名 / 覆盖判据）都必须走这里。 */
+function mainlineNodes() {
+  ensureBranch();
+  const out = [];
+  let cur = branchRoot;
+  while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; out.push(cur); }
+  return out;
+}
+
 /* 当前走的是不是主变那条链（从根沿每层 _cs[0] 走到底）。
    ⚠️ 要比**节点身份**（main[i] !== state.moves[i]），不能比坐标 ——
       同一个坐标完全可能在两条支上都出现，比坐标会误判。
    存在的意义：全盘讲解按手号写缓存并落盘，若此刻走在旁支上，
-   同一段手号指的是**另一盘棋**，跑一次就会把主线那份（几小时才跑出来的）讲解覆盖掉。 */
+   同一段手号指的是**另一盘棋**，跑一次就会把主线那份（几小时才跑出来的）讲解覆盖掉。
+   ★★ 2026-10-23：**「当前路径是主线的前缀」也算在主变上** —— 打谱走到第 15 手
+      （还没走完 20 手）当然没有岔开。原来要求长度必须相等，于是"按记录落一手"之后
+      全盘讲解会被误挡，还谎报"从第 16 手起就和主变不一样了"。 */
 function currentPathIsMainline() {
   ensureBranch();
   if (state.draft) return false;
-  const main = [];
-  let cur = branchRoot;
-  while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; main.push(cur); }
-  if (main.length !== state.moves.length) return false;
-  for (let i = 0; i < main.length; i++) if (main[i] !== state.moves[i]) return false;
+  const main = mainlineNodes();
+  if (main.length < state.moves.length) return false;
+  for (let i = 0; i < state.moves.length; i++) if (main[i] !== state.moves[i]) return false;
   return true;
 }
 
@@ -827,15 +892,14 @@ function currentPathIsMainline() {
  *   实测复现不出"按空格本身会导致判成分支"（新对局、两份真实棋谱各按 4 次空格，判定全程正常），
  *   真正会岔开的是「悔棋之后又落子」这类操作：那确实从某一点长出一条新支。
  *   所以这条的价值是**告诉用户岔在第几手**，让他知道往哪儿看、怎么切回去。
- * 判据按**节点身份**比（与 currentPathIsMainline 同口径），不比坐标。 */
+ * 判据按**节点身份**比（与 currentPathIsMainline 同口径），不比坐标。
+ * ★ 2026-10-23：长度不同但**节点逐个对得上**（= 只是还没走完）→ 返回 0，没岔开。 */
 function mainlineDivergenceAt() {
   ensureBranch();
-  const main = [];
-  let cur = branchRoot;
-  while (cur && cur._cs && cur._cs.length) { cur = cur._cs[0]; main.push(cur); }
+  const main = mainlineNodes();
   const n = Math.min(main.length, state.moves.length);
   for (let i = 0; i < n; i++) if (main[i] !== state.moves[i]) return i + 1;
-  return main.length === state.moves.length ? 0 : n + 1;
+  return 0;
 }
 
 /* 某个节点在不在主变链上（从根沿每层 _cs[0] 一路到底）。
@@ -862,8 +926,11 @@ function onMainline(node) {
  *   所以按首相要求「别的软件怎么做就怎么做」：**只显示手数、靠位置区分**。
  *   「这里分岔了」的提示由珠子上的 ▾ / +n 角标负责，那比后缀清楚得多。
  *
- * ⚠️ 手数列表（renderMoveList）也调它，但那边只列**当前路径**上的手，
- *    `depth` 恒等于 `i + 1` —— 所以去掉后缀对列表没有任何影响（旁支的重复手数不会出现在列表里）。 */
+ * ⚠️ 手数列表（renderMoveList）也调它 —— 那边列的是**当前这条支**（路径 + 沿 _cs[0] 到底），
+ *    所以同一深度可能出现两次（分叉之后两条支各有一颗）；列表本身就是按"这一条线"列，
+ *    不会出现两支混排：`chain[i]` 的 depth 恒等于 `i + 1`。
+ *    ★ 2026-10-23：本节开场说"列表只列当前路径"已经过时（落子只走一手之后，
+ *      列表改成列整条支了）—— 别照着旧说法去推列表的行为。 */
 function moveLabelOf(node) {
   if (!node) return '';
   let depth = 0;
@@ -1876,6 +1943,11 @@ function askDeleteBranch(node, depth, n) {
   }
   if (mask.classList.contains('open')) return;   // 连点两次不重入
   const close = () => mask.classList.remove('open');
+  /* ⚠️ 这个确认窗与 askConfirm（打开棋谱前的提示）**共用 DOM** ——
+     标题/按钮文字/危险色每次都要自己摆回来，别沿用上一个流程留下的。 */
+  $('db-title').textContent = '删除分支';
+  $('db-ok').textContent = '删除';
+  $('db-ok').classList.add('danger');
   $('db-body').innerHTML =
     '<p>确定删掉<b>第 ' + depth + ' 手</b>起的整条分支吗？</p>'
     + '<p>这一枝一共 <b>' + n + '</b> 手（含它后面的全部变化）。</p>'
@@ -2061,7 +2133,12 @@ function tryPlay(x, y, byAI) {
   }
 
   const b = boardAt(state.moves.length);
-  if (b[idx(x, y)] !== 0) return false;
+  if (b[idx(x, y)] !== 0) {
+    /* ★ 2026-10-23（审查）：点到已经有子的交叉点原来**完全没反应** ——
+       用户不知道"是点偏了 / 这手不能下 / 软件卡了"。给一句话（AI 落子不打扰用户）。 */
+    if (!byAI) flash(state.draft ? '这一点已经有子了' : '这一点已经有子了 —— 换一个空点');
+    return false;
+  }
 
   /* ★★★ 打劫禁着点（2026-10-15 修「倒扑被当成劫」后的最终形态）
      —— 判据**照主流开源软件 Sabaki 的 @sabaki/go-board（GoBoard.js 第 82-93 行）来**：
@@ -2130,23 +2207,36 @@ function tryPlay(x, y, byAI) {
        （父的 `_cs` 里没有它，从根走不到），但手数列表会拿它当"父节点"去问有没有旁支，
        少这两个字段就是 TypeError 白屏（见 branchParentAt 的注释）。 */
     state.moves.push({ x, y, color: state.toMove, captured, capAt: capAt || undefined, _p: null, _cs: [] });
+    clearCoachAt(state.moves.length);
   } else {
     ensureBranch();
     const ndParent = state.moves.length ? state.moves[state.moves.length - 1] : branchRoot;
     let ndNew = null;
     for (const c of ndParent._cs) { if (!c.pass && c.x === x && c.y === y) { ndNew = c; break; } }
+    /* ★ 2026-10-23（审查二）：**复用已有的手 ≠ 换了棋**。
+       原来不管复用还是新建，都无条件 `clearCoachAt(这一手)` —— 打谱按记录一手一手走时，
+       每一手的讲解/棋谱解说词都来自这份棋谱、本来就对，却被当成"旧棋的残留"清掉
+       （走一手丢一手，右下角解说词框直接变空）。
+       现在：复用 → 把寄在这个节点上的讲解/解说词/评估**放回来**；新建 → 才作废旧讲解。 */
+    const reused = !!ndNew;
     if (!ndNew) {
       ndNew = { x, y, color: state.toMove, captured, capAt: capAt || undefined, _p: ndParent, _cs: [] };
       ndParent._cs.push(ndNew);
     }
-    /* ★★ 2026-10-15（审查补 · P1-1）：**复用已有节点时必须沿 `_cs[0]` 把尾巴接回来**。
-       原来只 push 这一个节点 —— 于是 `pathThrough(ndNew)` 比 `state.moves` 长：
-       悔棋后重下同一手，原来那条支明明还在树上，却点不动珠子、滑杆拉不到底、
-       → 键不动，看着像**后半盘棋丢了**（三条翻页路都被静默夹回，连提示都没有）。
-       复用与新建在这里合流：一律走 pathThrough + setPath（换路径的唯一出口）。 */
-    setPath(pathThrough(ndNew));
+    /* ★★ 2026-10-23（首相报：回看到第 14 手、按棋谱记录落第 15 手，**直接跳到该支最后一手**）：
+       **落子只走到落下的这一手**，复用与新建一律 `pathFromRoot`。
+       成熟软件就是这个口径 —— Sabaki 的 makeMove 走 `appendNode`（同着合并到已有子节点，
+       见 immutable-gametree 的 UNSAFE_appendNodeWithId），随后 `setCurrentTreePosition` 到
+       **那个节点**，不会沿主变往前跑；前进一手是显式的 goStep(1)。
+       ⚠️ 别再改回 pathThrough：2026-10-15 的 P1-1 用的是"落子后接到支末"，
+          那正好把「按谱走一手」变成「跳到谱末」—— 审查单只验证了"尾巴够得着"，
+          没验证"落一手应该停一手"。
+       P1-1 的那条要求（尾巴够得着）改由翻页兜住：gotoView → extendPathTo 沿 `_cs[0]` 接回来，
+       滑杆上限也换成 reachLength()（见 syncUI）。 */
+    setPath(pathFromRoot(ndNew));
+    if (reused) { restoreExplainForPath(); restoreAnalysisForPath(); }
+    else clearCoachAt(state.moves.length);   // 新建 = 这一手换了棋，旧讲解作废
   }
-  clearCoachAt(state.moves.length);      // 这个手号上的旧讲解作废（悔棋换了别的棋，见函数注释）
   clockSwitch();                         // 结算本手用时，换对方
   state.pv = null;                       // 变化图只对当前局面有效，落了子就收掉
   state.viewAt = state.moves.length;
@@ -2321,10 +2411,23 @@ canvas.addEventListener('mouseleave', () => {
 const $ = id => document.getElementById(id);
 
 function syncUI() {
-  const total = state.moves.length;
+  /* ★ 2026-10-23：这里要的是「这条支一共多少手」，不是「已经走到第几手」——
+     落子只走到落点之后，`state.moves.length` 会比树上实际手数短（回看时本来就短）。
+     用 reachLength() 才不会出现「滑杆拉不到底 / 珠子点不动」那条老毛病（P1-1）。 */
+  const total = reachLength();
   $('slider').max = total;
   $('slider').value = state.viewAt;
   $('counter').textContent = `${state.viewAt} / ${total}`;
+
+  /* ★ 2026-10-23（审查二）：计时器的「轮到谁」必须跟着**路径**走。
+     悔棋 / 切分支 / 撤销删除这些不经过 clockSwitch 的操作会让手数跳变，
+     而 c.side 原来只在落子时翻转一次 —— 跳完就对不上，时间会记到另一方头上。
+     （判负判的是"谁的时间用完了"，错一方就是错一盘。） */
+  if (state.clock && state.clock.on && !state.clock.expired) {
+    state.clock.side = sideToMove(state.moves.length);
+    /* 阶段也跟着这一方重算（主时间用完才进读秒）—— 跳变之后原来那个 phase 是别人的 */
+    state.clock.phase = state.clock[state.clock.side].t > 0 ? 'main' : 'byo';
+  }
 
   const R = RULES[settings.rules] || RULES.chinese;
   const sizeTxt = N === 19 ? '' : `${N} 路 · `;
@@ -2416,13 +2519,23 @@ function syncUI() {
   /* 顶栏徽标：试下一眼可见（用户要求「进入试下状态要显示」） */
   $('draft-badge').hidden = !state.draft;
 
-  $('btn-undo').disabled = total === 0;
+  /* ★ 2026-10-23（审查）：这两个动作**只对末端有效**（回看中会提示"先跳到最新"）——
+     按钮却一直亮着，点下去才发现不让点。现在按真实可用性置灰，title 说明原因。
+     （「导出 / 数子」不在此列：它们对"眼下这一手"也有意义，照旧可点。） */
+  $('btn-undo').disabled = total === 0 || state.viewAt !== state.moves.length;
+  $('btn-undo').title = state.viewAt !== state.moves.length
+    ? '回看中不能悔棋 —— 先按 → 回到最新一手（或点「跳末」）'
+    : '悔棋（Ctrl+Z）';
   $('btn-save').disabled = total === 0;
   $('btn-score').disabled = total === 0;
   $('btn-resign').disabled = total === 0 || !!state.result;
   /* 未开局时「停一手 / 试下」也要置灰 —— 没有对局，这两个动作没有意义
-     （disable 之后连快捷键调 .click() 也点不动，不用另加判断）。 */
-  $('btn-pass').disabled = state.noGame;
+     （disable 之后连快捷键调 .click() 也点不动，不用另加判断）。
+     ★ 2026-10-23：停一手同样只在末端有效，回看中一并置灰。 */
+  $('btn-pass').disabled = state.noGame || state.viewAt !== state.moves.length;
+  $('btn-pass').title = (!state.noGame && state.viewAt !== state.moves.length)
+    ? '回看中不能落子 —— 先按 → 回到最新一手'
+    : '停一手（双方连续停一手即终局）';
   $('btn-draft').disabled = state.noGame;
   $('sel-terr').disabled = !state.showTerritory;   // 形势关掉时，偏好下拉跟着置灰
   /* 未开局：棋盘中央那个大胶囊按钮（引导新建对局）；
@@ -2514,6 +2627,9 @@ function flash(msg) {
 }
 
 function gotoView(n) {
+  /* ★ 2026-10-23：往前翻要能**沿树接上**（落子只走一手之后，后面那一段不在路径上）。
+     接不上（末端没有子）就照旧夹回，不报错。 */
+  if (n > state.moves.length) extendPathTo(n);
   state.viewAt = Math.max(0, Math.min(state.moves.length, n));
   /* ★★ 2026-10-15（自检抓到的第 41 条，审查单没提）：**翻手数也要重算劫点**。
      refreshDerived 的口径写得很清楚 —— 「劫点按**正在看的那一手**算，不按末端」，
@@ -2529,7 +2645,7 @@ function gotoView(n) {
 $('btn-first').onclick = () => gotoView(0);
 $('btn-prev').onclick = () => gotoView(state.viewAt - 1);
 $('btn-next').onclick = () => gotoView(state.viewAt + 1);
-$('btn-last').onclick = () => gotoView(state.moves.length);
+$('btn-last').onclick = () => gotoView(reachLength());
 $('slider').oninput = e => gotoView(+e.target.value);
 
 /* ---------------- 试下（打草稿） ----------------
@@ -2886,15 +3002,24 @@ $('btn-undo').onclick = () => {
     if (state.draft) flash('已经退到试下的起点了');
     return;
   }
-  state.moves.pop();
+  /* ★ 2026-10-23（审查）：**先把要退掉的那几手算出来，再一次性截断**。
+     原来是一手一手 pop —— 退掉的节点上什么都没留，于是按 → 走回去时
+     讲解 / 解说词 / 胜率 / 目差全都没了（落子和切分支都会「寄回节点」，只有悔棋漏了）。
+     `before` 是截断前的路径，寄的时候要按它取节点（截断之后 state.moves 里已经没有那几手了）。 */
+  const before = state.moves.slice();
+  let to = state.moves.length - 1;
   /* 人机对弈模式：撤到「又轮到自己」为止 —— 否则 AI 会立刻把这一手补回来，看着像没撤。
      试下时不做这个联动：草稿里你想退几手就退几手。 */
   if (!state.draft) {
-    while (settings.mode === 'play' && state.moves.length &&
-           sideToMove(state.moves.length) !== state.myColor) {
-      state.moves.pop();
+    while (settings.mode === 'play' && to > floor &&
+           sideToMove(to) !== state.myColor) {
+      to -= 1;
     }
   }
+  if (to < floor) to = floor;
+  stashExplainAfter(to, before);
+  stashAnalysisAfter(to, before);
+  state.moves.length = to;
   /* ★★ 禁着点必须**重新算出来**，不能清成 null（2026-10-07 用户报的真 bug）。
      原来这里写的是 `state.koPoint = null;`，注释说「局面变了，打劫禁着点随之失效」——
      那句话只对了一半：**退掉了提劫那一手**时它确实该失效，但**退到"刚提完劫"那个局面**时
@@ -3597,7 +3722,10 @@ async function saveToRecords() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-  const realMoves = state.draft ? state.draft.from : state.moves.length;   // 草稿不进棋谱
+  /* ★ 2026-10-23：文件名里的手数用**主线长度**（这盘棋一共多少手）。
+     原来用 state.moves.length —— 打谱走到第 16 手时导出，文件叫「16手」、内容却是整盘 20 手。
+     草稿（试下）不进棋谱（buildSGF 写字树、草稿手根本不挂树），所以取主线就是对的。 */
+  const realMoves = mainlineNodes().length;
   const name = `${stamp}-${realMoves}手.sgf`;
   const r = await window.api.records.save(name, buildSGF());
   if (!r || r.error) { flash('保存失败：' + ((r && r.error) || '未知')); return null; }
@@ -3743,7 +3871,9 @@ async function refreshRecords() {
          ★ 走 records.save：它自己会先留一份 .bak 备份、并按**原编码**写回
            （GBK 棋谱不会被改成 UTF-8），所以覆盖是能捞回来的。 */
       mk('覆盖', '把当前这盘棋写进这份棋谱，替换它原来的内容（覆盖前会自动留一份 .bak 备份，可以捞回来）', function () {
-        if (state.moves.length < 2) {
+        /* ★ 2026-10-23：判据改成「树里有没有棋」（主线长度）—— 回看到前面几手时
+           明明有一整盘棋，原来会说"当前还没有棋局内容"。 */
+        if (mainlineNodes().length < 2) {
           flash('当前还没有棋局内容 —— 覆盖会把这份棋谱清空，先下几手再来');
           return;
         }
@@ -3795,7 +3925,45 @@ async function refreshRecords() {
   }
 }
 
+/* 通用确认窗（2026-10-23）：借 #delbranch 那套 DOM（它本质就是「标题 + 正文 + 取消/确定」）。
+   ⚠️ 与 askDeleteBranch 共用同一个遮罩 —— 同一时刻只会有一个，两处都靠 `.open` 判重入。
+   Electron 里 `confirm()` 会**阻塞整个渲染进程**，所以不用它（见 askDeleteBranch 的注释）。 */
+function askConfirm(opts) {
+  const mask = $('delbranch');
+  if (!mask) return Promise.resolve(opts.fallback === undefined ? true : opts.fallback);
+  if (mask.classList.contains('open')) return Promise.resolve(false);   // 已经有一个在问
+  return new Promise(resolve => {
+    $('db-title').textContent = opts.title || '确认';
+    $('db-body').innerHTML = opts.body || '';
+    $('db-ok').textContent = opts.okText || '确定';
+    $('db-ok').classList.toggle('danger', !!opts.danger);
+    const close = v => {
+      mask.classList.remove('open');
+      mask.onclick = null;
+      resolve(v);
+    };
+    $('db-ok').onclick = () => close(true);
+    $('db-cancel').onclick = () => close(false);
+    mask.onclick = e => { if (e.target === mask) close(false); };
+    mask.classList.add('open');
+    if ($('db-cancel').focus) $('db-cancel').focus();
+  });
+}
+
 async function openRecord(name) {
+  /* ★★ 2026-10-23（审查）：**打开棋谱会整盘替换掉当前的棋**。
+     原来对局/摆棋到一半点「打开」，当前那盘就静默消失了（没存就没处找）。
+     只在「当前这盘是自己的（不是打谱来的）」时问一句；打谱中切棋谱不打扰。 */
+  if (!state.fromRecord && state.moves.length) {
+    const n = mainlineNodes().length;
+    const ok = await askConfirm({
+      title: '打开棋谱',
+      body: '<p>当前这盘还没导出（共 <b>' + n + '</b> 手）。</p>'
+        + '<p class="dim">打开这份棋谱会把棋盘换成它 —— 想留着当前这盘，先点底栏「导出棋谱」。</p>',
+      okText: '仍然打开',
+    });
+    if (!ok) return;
+  }
   const r = await window.api.records.read(name);
   if (!r || r.error) { flash('读取失败：' + ((r && r.error) || '未知')); return; }
   REC_MASK.classList.remove('open');
@@ -3829,7 +3997,9 @@ $('rec-change-dir').onclick = async () => {
   flash(tip);
 };
 $('rec-save-now').onclick = async () => {
-  if (!state.moves.length) { flash('还没落子，没什么可存的'); return; }
+  /* ★ 2026-10-23：判据看**树里有没有棋**（主线长度），不看"走到第几手"——
+     回看到第 1 手时不该说"还没落子"。 */
+  if (!mainlineNodes().length) { flash('还没落子，没什么可存的'); return; }
   await saveToRecords();
   refreshRecords();
 };
@@ -4711,7 +4881,20 @@ $('gate-setup').onclick = () => openSettings();
 $('m-cancel').onclick = () => $('newgame').classList.remove('open');
 $('newgame').onclick = e => { if (e.target === $('newgame')) $('newgame').classList.remove('open'); };
 
-$('m-start').onclick = () => {
+$('m-start').onclick = async () => {
+  /* ★ 2026-10-23（审查二）：新建对局与「打开棋谱」是同一类动作 —— 都会顶掉当前这盘。
+     上一轮只给打开棋谱加了确认，这条漏了（用户对局到一半点「新对局 → 开始」，
+     当前这盘同样无声消失）。 */
+  if (!state.fromRecord && state.moves.length) {
+    const n = mainlineNodes().length;
+    const ok = await askConfirm({
+      title: '新建对局',
+      body: '<p>当前这盘还没导出（共 <b>' + n + '</b> 手）。</p>'
+        + '<p class="dim">开始新对局会把棋盘清空 —— 想留着当前这盘，先点底栏「导出棋谱」。</p>',
+      okText: '仍然新建',
+    });
+    if (!ok) return;
+  }
   settings.rules = $('m-rules').value;
   setLevel($('m-level').value);
   settings.clock = $('m-clock').value;
@@ -5032,7 +5215,7 @@ function scheduleStallRecovery() {
  *
  * 症状：悔棋后 KataGo 的分析**彻底停住**（搜索量不涨、胜率条不再更新）。
  * 实测数据（_cdp_undo.mjs）：落 10 手后悔棋 3 次 →
- *     moves=7，但队列 q=[5,6,7,8,9,10]（**8/9/10 已是��存在的局面**），
+ *     moves=7，但队列 q=[5,6,7,8,9,10]（**8/9/10 已是不存在的局面**），
  *     history 的有效项数涨到 11（**比手数还多**），visits 恒定在 515 不动。
  *
  * 两个根因（缺一不可）：
@@ -6250,7 +6433,14 @@ function clockSwitch() {
   if (!c.on || c.expired || c.paused) return;   // 试下（草稿）期间不走表
   const now = performance.now();
   const el = Math.max(0, (now - c.since) / 1000);
-  const st = c[c.side];
+  /* ★ 2026-10-23（审查二）：**按手数认出"刚落子的是谁"**，别靠"翻转一次"。
+     原来只做 `c.side = 对方` —— 而落子未必发生在末端的下一手：
+       · 回看第 10 手落一手 → 路径截到 10、落第 11 手（该白走），
+         而 c.side 还停在第 20 手之后的黑方 → **扣了黑的时间**；
+       · 悔棋之后同理会错位。
+     口径：第 n 手是 sideToMove(n-1) 下的，落完轮到 sideToMove(n)。 */
+  const mover = sideToMove(Math.max(0, state.moves.length - 1));
+  const st = c[mover];
 
   if (c.phase === 'main') {
     st.t = Math.max(0, st.t - el);
@@ -6258,7 +6448,7 @@ function clockSwitch() {
   }
   /* 读秒阶段不扣总时间 —— 读秒是「每手独立给 N 秒」 */
 
-  c.side = c.side === 'b' ? 'w' : 'b';
+  c.side = sideToMove(state.moves.length);
   c.phase = c[c.side].t > 0 ? 'main' : 'byo';
   c.since = now;
   beepedSec = -1;             // 换手 → 读秒报时的「响过哪一秒」要重算，否则下一手不响
@@ -6721,7 +6911,17 @@ function renderCurve() {
 let lastScrolledAt = -1;      // 列表上次自动滚到的手数（免得边算边刷时反复把用户拽回来）
 
 function renderMoveList() {
-  const ul = $('movelist');  const total = state.moves.length;
+  const ul = $('movelist');
+  /* ★ 2026-10-23：列表要列出**这条支的全部手**，不只是"已经走到的那几手" ——
+     落子只走到落点之后（按棋谱打谱会停在中间），继续用 state.moves[i] 会把后半盘从列表里抹掉。
+     chain = 当前路径 + 末端沿 `_cs[0]` 到底（与 syncUI 的 reachLength 同一口径）。 */
+  ensureBranch();
+  /* ⚠️ 草稿（试下）期间**不能**用 pathThrough：草稿手是"不挂树"的裸节点（`_p: null`，决策 10），
+     pathFromRoot 走到它就断 → 列表只剩一行。草稿期间直接用 state.moves 本身。 */
+  const chain = state.draft
+    ? state.moves.slice()
+    : pathThrough(state.moves.length ? state.moves[state.moves.length - 1] : branchRoot);
+  const total = chain.length;
   if (!total) { ul.innerHTML = '<li class="empty">还没有落子</li>'; return; }
 
   /* ★★ 坑位 39（2026-10-13 审查补）：主变链一次算好。
@@ -6739,7 +6939,7 @@ function renderMoveList() {
 
   let html = '';
   for (let i = 0; i < total; i++) {
-    const m = state.moves[i];
+    const m = chain[i];
     const side = m.color === 'b' ? '黑' : '白';
     const pt = m.pass ? '停一手' : GTP_COLS[m.x] + (N - m.y);
 
@@ -6775,9 +6975,13 @@ function renderMoveList() {
     /* 试下（草稿）里下的手单独标出来 —— 免得过一会儿忘了自己在草稿里 */
     const isDraft = state.draft && (i + 1) > state.draft.from;
     /* ★ 手数分支（2026-10-13）：这一手有别的走法（旁支）就在行上标出来，↑/↓ 切换。
-       判据是「它的父亲下有几个孩子」—— 列表只显示当前路径，所以只能靠这种标记告诉用户
-       「这里其实岔开了，另一条线不在列表上」（完整的水平分叉树面板是下一步）。 */
-    const bi = branchInfoOf(i);
+       判据是「它的父亲下有几个孩子」—— 列表只显示当前这条支，所以只能靠这种标记告诉用户
+       「这里其实岔开了，另一条线不在列表上」（完整的水平分叉树面板是下一步）。
+       ★ 2026-10-23：改按**节点**算（原来是 branchInfoOf(i)，它读 state.moves[i]）——
+         列表比当前路径长时，下半截在 state.moves 里根本取不到，标出来就是错的。 */
+    const _par = m._p;
+    const _sib = (_par && _par._cs) || [];
+    const bi = { n: _sib.length, idx: _sib.indexOf(m) };
     const brTag = bi.n > 1
       ? '<span class="br" title="这一点共 ' + bi.n + ' 种走法，现在看的是第 ' + (bi.idx + 1) + ' 种 —— ↑/↓ 换分支">⑂' + (bi.idx + 1) + '/' + bi.n + '</span>'
       : '';
@@ -7067,7 +7271,14 @@ window.addEventListener('keydown', e => {
   }
 
   if (e.ctrlKey || e.metaKey) {
-    if (e.code === 'KeyZ') { e.preventDefault(); $('btn-undo').click(); }
+    if (e.code === 'KeyZ') {
+      e.preventDefault();
+      /* ★ 2026-10-23：悔棋按钮现在会因「回看中」而置灰 —— 快捷键必须**说清为什么**，
+         否则按 Ctrl+Z 毫无反应（禁用按钮的 click 是静默空操作）。 */
+      if ($('btn-undo').disabled) {
+        flash(state.moves.length ? '回看中不能悔棋 —— 先按 → 回到最新一手（或点「跳末」）' : '还没有落子');
+      } else $('btn-undo').click();
+    }
     return;
   }
   /* ★★ 2026-10-15 首相要求「检索一遍所有按键，细碎没用的删掉，显示开关这类刚需不能删」——
@@ -8773,13 +8984,18 @@ function setBatchBar(on, done, total, txt) {
    list 的下标 = 手数（0 位空着），这样读回来能直接按手数对上。 */
 function saveCoachFile() {
   if (!state.recName) return Promise.resolve(null);
+  /* ★ 2026-10-23：按**主线**存（这盘棋一共多少手），不按"已经走到第几手"。
+     原来用 state.moves.length —— 打谱走到第 15 手时保存，后面 5 手的讲解**静默没写进去**。
+     真走在旁支上时不写：那种手号属于另一盘棋，写进去就是错挂（全盘讲解本身也挡着这条）。 */
+  if (!currentPathIsMainline()) return Promise.resolve(null);
+  const n = mainlineNodes().length;
   const list = [];
-  for (let i = 0; i <= state.moves.length; i++) list.push(state.coach.explain[i] || null);
+  for (let i = 0; i <= n; i++) list.push(state.coach.explain[i] || null);
   /* ★ 2026-10-13：`cv` 也写进**顶层** —— 棋谱库列表只读文件头 400 字节判断版本，
      埋在 list 每一项里它读不到（见 main.js 的 coachVerOf）。
      ★ 同时写 `sg` = 主线手顺指纹（坑位 42 的方案 A）：讲解也是按手号存的，
      「覆盖」把棋谱换成另一盘之后，旧讲解挂在新内容上一样是错的 —— 读回来时先比这个。 */
-  const json = JSON.stringify({ v: 1, cv: COACH_VER, sg: mainlineSig(), n: state.moves.length, list: list });
+  const json = JSON.stringify({ v: 1, cv: COACH_VER, sg: mainlineSig(), n: n, list: list });
   try {
     return Promise.resolve(window.api.records.saveCoach(state.recName, json)).catch(() => null);
   } catch (e) { return Promise.resolve(null); }
@@ -8817,10 +9033,10 @@ async function loadReviewForRecord(name) {
       return;
     }
   } else {
-    const want = state.moves.length + 1;
+    const want = mainlineNodes().length + 1;      // ★ 2026-10-23：整盘手数（不是"走到第几手"）
     if (rv.history.length !== want) {
       flash('这份棋谱旁边的复盘数据是 ' + (rv.history.length - 1) + ' 手的，和现在的 '
-        + state.moves.length + ' 手对不上（棋谱改过？）—— 没有显示，重跑一次「AI 复盘」就有了');
+        + mainlineNodes().length + ' 手对不上（棋谱改过？）—— 没有显示，重跑一次「AI 复盘」就有了');
       return;
     }
   }
@@ -8857,7 +9073,10 @@ async function loadCoachForRecord(name) {
   const list = (data && data.list) || [];
   const box = {};
   let stale = 0;                        // 旧版式的（讲错了点的那批）
-  for (let at = 1; at < list.length && at <= state.moves.length; at++) {
+  /* ★ 2026-10-23：上限用**主线长度**（这盘棋一共多少手）。原来用 state.moves.length ——
+     "走一半的路径"会把后半盘讲解读不回来（同一个根子：路径 ≠ 整盘）。 */
+  const nMain = mainlineNodes().length;
+  for (let at = 1; at < list.length && at <= nMain; at++) {
     const it = list[at];
     if (!it || !it.body) continue;
     if (!coachVerOK(it)) { stale++; continue; }
@@ -9041,7 +9260,12 @@ async function runBatchCoach() {
   }
   if (needEngine('coach', '全盘讲解')) return;
   if (needEngine('analyze', '全盘讲解')) return;
-  const n = state.moves.length;
+  /* ★ 2026-10-23：全盘讲解是「这盘棋」的讲解 —— 一律按**主线**取手。
+     原来用 state.moves（= 已经走到第几手）：打谱走到第 15 手时只讲 15 手，
+     而落盘的 coach.json 绑的是整条主线的指纹 —— 内容与声明对不上。
+     A1 修好之后「走到中间」不再被挡，这里就必须自己把口径摆正。 */
+  const main = mainlineNodes();
+  const n = main.length;
   if (!n) { flash('这份棋谱里没有手顺，讲不了'); return; }
 
   /* ★★ 2026-10-14 首相要求：**别白算** —— 已经算过的、已经讲过的，先问一句再动手。
@@ -9122,7 +9346,7 @@ async function runBatchCoach() {
     } else {
       const req = {
         initialStones: state.setup.map(s => [s.color === 'b' ? 'B' : 'W', toGTP(s.x, s.y)]),
-        moves: state.moves.map(m => [m.color === 'b' ? 'B' : 'W', m.pass ? 'pass' : toGTP(m.x, m.y)]),
+        moves: main.map(m => [m.color === 'b' ? 'B' : 'W', m.pass ? 'pass' : toGTP(m.x, m.y)]),
         rules: (RULES[settings.rules] || RULES.chinese).kata,
         komi: settings.komi,
         size: N,
@@ -9208,7 +9432,7 @@ async function runBatchCoach() {
     for (let i = 0; i < todo.length; i++) {
       if (batchStop || gen !== gameGen) break;
       const at = todo[i];
-      const m = state.moves[at - 1];
+      const m = main[at - 1];
       /* ★★ 2026-10-15（审查补 · P2-15）：**越界守卫 + 不许静默中断**。
          批量讲解要跑几分钟，期间用户回看落子会把路径截短（`state.moves.length = forked`），
          而 todo 是发起时算好的 → `state.moves[at-1]` 变 undefined → 抛 TypeError 整轮中断；
@@ -9244,7 +9468,7 @@ async function runBatchCoach() {
         const explainHead = '这一手 ' + pt + '（' + sideTxt + '棋第 ' + at + ' 手）下出来，'
           + verdictLead(v, at);
         const ask = () => coachAsk(
-          coachPromptActual(state.moves.slice(0, at), boardAt(at), m.color, at,
+          coachPromptActual(main.slice(0, at), boardOfPath(main, at), m.color, at,
             m.pass ? -1 : m.x, m.pass ? -1 : m.y, explainHead, verdictTone(v)),
           520);
         let r = await ask();

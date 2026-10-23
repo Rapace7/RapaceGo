@@ -1807,7 +1807,9 @@ ipcMain.handle('records:import', async () => {
           if (looksUtf8(buf)) return buf.toString('utf8');
           try { return new TextDecoder('gbk').decode(buf); } catch (e) { return buf.toString('utf8'); }
         })();
-        if (!/\(\s*;/.test(text) || !/\bGM\[1\]/.test(text)) { failed.push(base + '（不像 SGF）'); continue; }
+        /* ★ 2026-10-23（审查）：原来要求 `GM[1]`，可 SGF 规范里 GM 的默认值就是 1 ——
+           不写 GM 的合法棋谱会被判「不像 SGF」。放宽成：有树、且至少有一手落子。 */
+        if (!/\(\s*;/.test(text) || !(/\bGM\[1\]/.test(text) || /;\s*[BW]\[/.test(text))) { failed.push(base + '（不像 SGF）'); continue; }
         let name = safeRecName(base);
         if (fs.existsSync(path.join(RECORDS_DIR, name))) {
           const stem = name.replace(/\.sgf$/i, '');

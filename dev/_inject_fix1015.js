@@ -39,8 +39,16 @@
   ok('P1-1 前置：悔棋后 3 手', state.moves.length === 3, state.moves.length);
   const q4 = G('Q4'); put(q4.x, q4.y); await sleep(160);
   const tailLen = pathThrough(state.moves[state.moves.length - 1]).length;
-  ok('P1-1 重下原来那一手 → 尾巴仍够得着（修前：moves 只有 4，树里却到 5，翻页全是静默空操作）',
-    state.moves.length === 5 && state.moves.length === tailLen, 'moves=' + state.moves.length + ' pathThrough=' + tailLen);
+  /* ★★ 2026-10-23 判据改口径（首相报「按棋谱落一手直接跳到底」）。
+     原来的断言要求"落子后 moves.length 直接等于整支长度" —— 那正是 bug 的来源：
+     逼着 tryPlay 复用节点时走 pathThrough → 打谱按记录落一手就跳到谱末。
+     现在的口径与 Sabaki 一致：**落子只停在这一手**，尾巴够得着由翻页负责。
+     所以这里改断言两段：① 落子后路径到 4 手；② 按 → 能走到第 5 手（尾巴真的够得着）。 */
+  ok('P1-1 重下原来那一手 → 滚到那一手就停（不自动跳到底）',
+    state.moves.length === 4 && tailLen === 5, 'moves=' + state.moves.length + ' pathThrough=' + tailLen);
+  gotoView(state.moves.length + 1); await sleep(120);
+  ok('P1-1b 接着按 → 能走回第 5 手（尾巴够得着：滑杆 / 珠子 / 翻页都不夹死）',
+    state.viewAt === 5 && state.moves.length === 5, 'viewAt=' + state.viewAt + ' moves=' + state.moves.length);
 
   /* ---------- P2-1 打劫禁着点：不再依赖 captured/capAt ---------- */
   await fresh();
