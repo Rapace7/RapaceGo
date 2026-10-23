@@ -121,7 +121,7 @@ node dev/_mk_real_regress.mjs "records\20261012-214057-217手.sgf" dev/_inject_r
 | `_smoke.mjs` / `_precheck.mjs` | 冒烟 / 模板串预检 | — |
 | `_rtest.py` | **跑 CDP 测试的启动器**：拉起 Electron（带调试口）→ 跑脚本 → 截图 → 关掉 | 参数顺序见下 |
 | `_sync_deploy.ps1` | 同步到免解压版（含逐文件哈希校验、自动备份，备份只留 2 份）。**2026-10-14 起备份排除引擎目录**（`KataGo` + `LoGos` 共 7.9 GB 权重）—— 每份从 **8259 MB 降到约 376 MB**。理由是：同步本就不动这两个目录、回退时它们原样在 `DeployDir` 里、引擎内容不变留一份就够 | — |
-| `_build_lazy.ps1` / `_update_lazy.ps1` | 重建懒人包 / 把新版拷进懒人包 | — |
+| `_build_lazy.ps1` / `_update_lazy.ps1` | 重建懒人包 / 把新版拷进懒人包（★ 2026-10-23：`_update_lazy` **跳过** `KataGo\` 与 `LoGos\` —— 那两个 `.bin.gz` 权重和 4.4GB 模型不随版本变，且整目录复制有误删风险。清理名单与复制跳过名单已拆成两个变量） | — |
 | `_check_encodings.ps1` | 检查 `.bat`/`.ps1` 的 BOM / CRLF / `%~dp0`（踩过好几次） | — |
 | `_guard_records.ps1` | 跑测试前锁住 `records/`、跑完还原（防测试污染用户棋谱） | `-Save` / `-Restore` |
 | `_paths.ps1` / `_verify_helpfix.ps1` / `_deploy.sh` | 路径工具 / 帮助面板专项 / 发布 | — |
